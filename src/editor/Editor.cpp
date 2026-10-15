@@ -1,7 +1,9 @@
 #include "editor/Editor.hpp"
 
 #include "cabinet_player_path.h"
+#include "common/BinaryIO.hpp"
 #include "common/Export.hpp"
+#include "common/Synth.hpp"
 #include "demo/Demo.hpp"
 
 #include <SDL.h>
@@ -13,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -170,62 +173,319 @@ std::vector<uint16_t>& Editor::activeLayer() {
     return stage->main;
 }
 
-void Editor::pushUndo() {
-    Stage* stage = currentStage();
-    if (!stage) return;
-    ensureLayers(*stage);
+uint32_t mixHash(uint32_t hash, uint32_t value) {
+    hash ^= value + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+    return hash;
+}
+
+uint32_t mixFloat(uint32_t hash, float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return mixHash(hash, bits);
+}
+
+uint32_t mixText(uint32_t hash, const std::string& text) {
+    return mixHash(hash, crc32(reinterpret_cast<const uint8_t*>(text.data()), text.size()));
+}
+
+uint32_t mixBlock(uint32_t hash, const Block& block) {
+    hash = mixHash(hash, static_cast<uint32_t>(block.kind));
+    hash = mixFloat(hash, block.num);
+    hash = mixFloat(hash, block.num2);
+    hash = mixHash(hash, static_cast<uint32_t>(block.pick));
+    hash = mixText(hash, block.name);
+    for (const auto& child : block.inner) hash = mixBlock(hash, child);
+    return hash;
+}
+
+uint32_t projectHash(const Project& project) {
+    uint32_t hash = 2166136261u;
+    hash = mixText(hash, project.settings.title);
+    hash = mixText(hash, project.settings.author);
+    hash = mixText(hash, project.settings.startStage);
+    hash = mixHash(hash, static_cast<uint32_t>(project.settings.viewW));
+    hash = mixHash(hash, static_cast<uint32_t>(project.settings.viewH));
+    hash = mixHash(hash, static_cast<uint32_t>(project.settings.scale));
+    hash = mixHash(hash, static_cast<uint32_t>(project.settings.lives));
+    hash = mixHash(hash, static_cast<uint32_t>(project.settings.maxHealth));
+    hash = mixHash(hash, project.settings.crt ? 1u : 0u);
+    hash = mixHash(hash, project.settings.screenShake ? 1u : 0u);
+    hash = mixHash(hash, static_cast<uint32_t>(project.nextUid));
+    for (const auto& stage : project.stages) {
+        hash = mixText(hash, stage.id);
+        hash = mixText(hash, stage.name);
+        hash = mixHash(hash, static_cast<uint32_t>(stage.width));
+        hash = mixHash(hash, static_cast<uint32_t>(stage.height));
+        hash = mixText(hash, stage.tilesetId);
+        hash = mixText(hash, stage.musicId);
+        hash = mixText(hash, stage.message);
+        hash = mixHash(hash, static_cast<uint32_t>(stage.physics));
+        hash = mixHash(hash, static_cast<uint32_t>(stage.scroll));
+        hash = mixHash(hash, static_cast<uint32_t>(stage.complete));
+        hash = mixFloat(hash, stage.autoScroll);
+        hash = mixFloat(hash, stage.gravity);
+        hash = mixFloat(hash, stage.jumpVel);
+        hash = mixFloat(hash, stage.playerSpeed);
+        hash = mixHash(hash, stage.intermission ? 1u : 0u);
+        hash = mixHash(hash, crc32(reinterpret_cast<const uint8_t*>(stage.main.data()), stage.main.size() * sizeof(uint16_t)));
+        hash = mixHash(hash, crc32(reinterpret_cast<const uint8_t*>(stage.back.data()), stage.back.size() * sizeof(uint16_t)));
+        hash = mixHash(hash, crc32(reinterpret_cast<const uint8_t*>(stage.front.data()), stage.front.size() * sizeof(uint16_t)));
+        for (const auto& placement : stage.placements) {
+            hash = mixText(hash, placement.actorId);
+            hash = mixFloat(hash, placement.x);
+            hash = mixFloat(hash, placement.y);
+        }
+    }
+    for (const auto& actor : project.actors) {
+        hash = mixText(hash, actor.id);
+        hash = mixText(hash, actor.name);
+        hash = mixText(hash, actor.spriteId);
+        hash = mixText(hash, actor.projectileId);
+        hash = mixText(hash, actor.dropActorId);
+        hash = mixHash(hash, static_cast<uint32_t>(actor.kind));
+        hash = mixHash(hash, static_cast<uint32_t>(actor.pickup));
+        hash = mixFloat(hash, actor.hitW);
+        hash = mixFloat(hash, actor.hitH);
+        hash = mixFloat(hash, actor.dropChance);
+        hash = mixHash(hash, static_cast<uint32_t>(actor.pickupAmount));
+        hash = mixHash(hash, actor.needsKey ? 1u : 0u);
+        hash = mixHash(hash, actor.checkpoint ? 1u : 0u);
+        hash = mixHash(hash, static_cast<uint32_t>(actor.behavior.pattern));
+        hash = mixHash(hash, static_cast<uint32_t>(actor.behavior.aim));
+        hash = mixFloat(hash, actor.behavior.speed);
+        hash = mixFloat(hash, actor.behavior.fireInterval);
+        hash = mixFloat(hash, actor.behavior.shotSpeed);
+        hash = mixFloat(hash, actor.behavior.shotAngle);
+        hash = mixFloat(hash, actor.behavior.spread);
+        hash = mixFloat(hash, actor.behavior.amplitude);
+        hash = mixFloat(hash, actor.behavior.period);
+        hash = mixFloat(hash, actor.behavior.lifetime);
+        hash = mixHash(hash, static_cast<uint32_t>(actor.behavior.hp));
+        hash = mixHash(hash, static_cast<uint32_t>(actor.behavior.touchDamage));
+        hash = mixHash(hash, static_cast<uint32_t>(actor.behavior.score));
+        hash = mixHash(hash, static_cast<uint32_t>(actor.behavior.burst));
+        hash = mixHash(hash, actor.behavior.gravity ? 1u : 0u);
+        hash = mixHash(hash, actor.behavior.turnAtEdge ? 1u : 0u);
+        hash = mixHash(hash, actor.behavior.turnAtWall ? 1u : 0u);
+        for (const auto& prop : actor.props) {
+            hash = mixText(hash, prop.name);
+            hash = mixFloat(hash, prop.initial);
+        }
+        for (const auto& script : actor.scripts) {
+            hash = mixBlock(hash, script.hat);
+            for (const auto& block : script.body) hash = mixBlock(hash, block);
+        }
+    }
+    for (const auto& sprite : project.sprites) {
+        hash = mixText(hash, sprite.id);
+        hash = mixText(hash, sprite.name);
+        hash = mixHash(hash, static_cast<uint32_t>(sprite.frameW));
+        hash = mixHash(hash, static_cast<uint32_t>(sprite.frameH));
+        hash = mixHash(hash, static_cast<uint32_t>(sprite.frames));
+        hash = mixFloat(hash, sprite.fps);
+        hash = mixHash(hash, crc32(sprite.rgba.data(), sprite.rgba.size()));
+    }
+    for (const auto& tile : project.tilesets) {
+        for (const auto& def : tile.tiles) {
+            hash = mixHash(hash, def.flags);
+            hash = mixHash(hash, static_cast<uint32_t>(def.damage));
+            hash = mixHash(hash, static_cast<uint32_t>(def.frames));
+            hash = mixFloat(hash, def.fps);
+        }
+    }
+    for (const auto& sound : project.sounds) {
+        hash = mixText(hash, sound.id);
+        hash = mixText(hash, sound.name);
+        hash = mixHash(hash, sound.music ? 1u : 0u);
+        hash = mixHash(hash, crc32(reinterpret_cast<const uint8_t*>(sound.samples.data()), sound.samples.size() * sizeof(int16_t)));
+    }
+    return hash;
+}
+
+void Editor::pushState(const Project& state) {
     Snapshot snap;
-    snap.width = stage->width;
-    snap.height = stage->height;
-    snap.main = stage->main;
-    snap.back = stage->back;
-    snap.front = stage->front;
-    snap.placements = stage->placements;
+    snap.project = state;
+    snap.stageIndex = stageIndex_;
     undo_.push_back(std::move(snap));
-    if (undo_.size() > 40) undo_.erase(undo_.begin());
+    if (undo_.size() > 25) undo_.erase(undo_.begin());
     redo_.clear();
 }
 
+void Editor::pushUndo() {
+    pushState(project_);
+    undoUsed_ = true;
+}
+
+void Editor::restore(const Snapshot& snap) {
+    project_ = snap.project;
+    stageIndex_ = std::clamp(snap.stageIndex, 0, std::max(0, static_cast<int>(project_.stages.size()) - 1));
+    if (selectedActor_ >= static_cast<int>(project_.actors.size())) selectedActor_ = project_.actors.empty() ? -1 : 0;
+    if (selectedSprite_ >= static_cast<int>(project_.sprites.size())) selectedSprite_ = project_.sprites.empty() ? -1 : 0;
+    if (selectedSound_ >= static_cast<int>(project_.sounds.size())) selectedSound_ = -1;
+    if (stageIndex_ >= 0 && stageIndex_ < static_cast<int>(project_.stages.size()) &&
+        selectedPlacement_ >= static_cast<int>(project_.stages[static_cast<size_t>(stageIndex_)].placements.size()))
+        selectedPlacement_ = -1;
+    if (blockActor_ < 0 || blockActor_ >= static_cast<int>(project_.actors.size())) blocksOpen_ = false;
+    before_ = project_;
+    undoReady_ = true;
+    undoUsed_ = true;
+}
+
 void Editor::undo() {
-    Stage* stage = currentStage();
-    if (!stage || undo_.empty()) return;
+    if (undo_.empty()) return;
     Snapshot current;
-    current.width = stage->width;
-    current.height = stage->height;
-    current.main = stage->main;
-    current.back = stage->back;
-    current.front = stage->front;
-    current.placements = stage->placements;
+    current.project = project_;
+    current.stageIndex = stageIndex_;
     redo_.push_back(std::move(current));
+    if (redo_.size() > 25) redo_.erase(redo_.begin());
     const Snapshot snap = undo_.back();
     undo_.pop_back();
-    stage->resize(snap.width, snap.height);
-    stage->main = snap.main;
-    stage->back = snap.back;
-    stage->front = snap.front;
-    stage->placements = snap.placements;
-    status_ = "Undid stage edit";
+    restore(snap);
+    status_ = "Undid";
 }
 
 void Editor::redo() {
-    Stage* stage = currentStage();
-    if (!stage || redo_.empty()) return;
+    if (redo_.empty()) return;
     Snapshot current;
-    current.width = stage->width;
-    current.height = stage->height;
-    current.main = stage->main;
-    current.back = stage->back;
-    current.front = stage->front;
-    current.placements = stage->placements;
+    current.project = project_;
+    current.stageIndex = stageIndex_;
     undo_.push_back(std::move(current));
+    if (undo_.size() > 25) undo_.erase(undo_.begin());
     const Snapshot snap = redo_.back();
     redo_.pop_back();
-    stage->resize(snap.width, snap.height);
-    stage->main = snap.main;
-    stage->back = snap.back;
-    stage->front = snap.front;
-    stage->placements = snap.placements;
-    status_ = "Redid stage edit";
+    restore(snap);
+    status_ = "Redid";
+}
+
+void Editor::checkLevel() {
+    levelNotes_.clear();
+    levelChecked_ = true;
+    Stage* stage = currentStage();
+    if (!stage) {
+        levelNotes_.push_back("There is no stage to check.");
+        return;
+    }
+    const Tileset* set = tileset();
+    const int tileW = set ? std::max(1, set->tileW) : 16;
+    const int tileH = set ? std::max(1, set->tileH) : 16;
+    if (stage->main.size() != static_cast<size_t>(stage->width) * stage->height)
+        levelNotes_.push_back("The tile map size does not match the stage.");
+    auto flagsOf = [&](uint16_t id) -> uint32_t {
+        if (id == 0 || !set || id > set->tiles.size()) return 0;
+        return set->tiles[id - 1].flags;
+    };
+    auto flagsAt = [&](int tx, int ty) -> uint32_t {
+        if (tx < 0 || ty < 0 || tx >= stage->width || ty >= stage->height) return 0;
+        return flagsOf(stage->get(stage->main, tx, ty)) | flagsOf(stage->get(stage->front, tx, ty));
+    };
+    auto standable = [&](int tx, int ty) {
+        const uint32_t flags = flagsAt(tx, ty);
+        return (flags & (TileSolid | TileOneWay)) != 0;
+    };
+    if (stage->intermission) levelNotes_.push_back("This stage is a message screen.");
+    int heroes = 0;
+    bool exit = false;
+    bool coin = false;
+    bool boss = false;
+    bool key = false;
+    bool door = false;
+    const float mapW = static_cast<float>(stage->width * tileW);
+    const float mapH = static_cast<float>(stage->height * tileH);
+    for (const auto& placement : stage->placements) {
+        const ActorDef* actor = project_.findActor(placement.actorId);
+        if (!actor) {
+            levelNotes_.push_back("A placed actor id is missing: " + placement.actorId);
+            continue;
+        }
+        if (placement.x < -tileW || placement.y < -tileH || placement.x > mapW || placement.y > mapH)
+            levelNotes_.push_back(actor->name + " sits outside the map.");
+        if (!actor->spriteId.empty() && !project_.findSprite(actor->spriteId))
+            levelNotes_.push_back(actor->name + " points at a missing sprite.");
+        if (actor->spriteId.empty() && actor->kind != ActorKind::Gun)
+            levelNotes_.push_back(actor->name + " has no sprite.");
+        if (!actor->projectileId.empty() && !project_.findActor(actor->projectileId))
+            levelNotes_.push_back(actor->name + " shoots a missing actor.");
+        if ((actor->behavior.pattern == AiPattern::Shooter || actor->behavior.pattern == AiPattern::Turret ||
+             actor->kind == ActorKind::Boss) &&
+            actor->projectileId.empty() && actor->kind != ActorKind::Hero)
+            levelNotes_.push_back(actor->name + " attacks, but has no projectile.");
+        if (actor->kind == ActorKind::Hero) {
+            ++heroes;
+            const int tx = static_cast<int>((placement.x + actor->hitW * 0.5f) / tileW);
+            const int ty = static_cast<int>((placement.y + actor->hitH * 0.5f) / tileH);
+            const uint32_t flags = flagsAt(tx, ty);
+            if (flags & TileSolid) levelNotes_.push_back("The hero starts inside a solid tile.");
+            if (flags & TileHazard) levelNotes_.push_back("The hero starts on a hazard.");
+        }
+        if (actor->kind == ActorKind::Check && !actor->checkpoint) exit = true;
+        if (actor->kind == ActorKind::Item && (actor->pickup == Pickup::Coin || actor->pickup == Pickup::PowerPellet)) coin = true;
+        if (actor->kind == ActorKind::Boss) boss = true;
+        if (actor->pickup == Pickup::Key) key = true;
+        if (actor->needsKey) door = true;
+    }
+    if (!stage->intermission && heroes == 0) levelNotes_.push_back("Place a hero on this stage.");
+    if (heroes > 1) levelNotes_.push_back("More than one hero is placed.");
+    if (!stage->intermission && stage->complete == CompleteMode::TouchExit && !exit)
+        levelNotes_.push_back("The stage ends at an exit, and none is placed.");
+    if (stage->complete == CompleteMode::CollectAll && !coin)
+        levelNotes_.push_back("The stage asks for every coin, and none is placed.");
+    if (stage->complete == CompleteMode::BossDead && !boss)
+        levelNotes_.push_back("The stage ends when a boss dies, and none is placed.");
+    if (door && !key) levelNotes_.push_back("A door needs a key, and none is placed.");
+    if (!stage->musicId.empty() && !project_.findSound(stage->musicId))
+        levelNotes_.push_back("The music id does not match a sound.");
+    bool stand = false;
+    for (int y = 0; y < stage->height && !stand; ++y)
+        for (int x = 0; x < stage->width; ++x)
+            if (standable(x, y)) stand = true;
+    if (!stage->intermission && (stage->physics == PhysicsMode::Platform || stage->physics == PhysicsMode::RunAndGun) && !stand)
+        levelNotes_.push_back("A platform stage needs a solid or one-way tile to stand on.");
+    for (int x = 0; x < stage->width; ++x) {
+        int run = 0;
+        int top = 0;
+        auto finishRun = [&]() {
+            if (run < 3) return;
+            const bool landing = standable(x - 1, top) || standable(x + 1, top) || standable(x - 1, top - 1) ||
+                                 standable(x + 1, top - 1) || standable(x, top - 1) || standable(x - 1, top + 1) ||
+                                 standable(x + 1, top + 1);
+            if (!landing)
+                levelNotes_.push_back("The ladder at column " + std::to_string(x) + " has no landing at the top.");
+        };
+        for (int y = 0; y < stage->height; ++y) {
+            if (flagsAt(x, y) & TileLadder) {
+                if (run == 0) top = y;
+                ++run;
+            } else {
+                finishRun();
+                run = 0;
+            }
+        }
+        finishRun();
+    }
+    if (levelNotes_.empty()) levelNotes_.push_back("This stage looks ready.");
+}
+
+void Editor::trackUndo() {
+    const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
+                      ImGui::IsAnyItemActive();
+    const bool released = ImGui::IsMouseReleased(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Right);
+    if (!undoReady_) {
+        before_ = project_;
+        undoReady_ = true;
+    }
+    if (down) {
+        undoBusy_ = true;
+        return;
+    }
+    if (!(undoBusy_ || released || undoUsed_)) return;
+    if (!undoUsed_ && projectHash(before_) != projectHash(project_)) {
+        pushState(before_);
+        before_ = project_;
+    } else if (undoUsed_) {
+        before_ = project_;
+    }
+    undoBusy_ = false;
+    undoUsed_ = false;
 }
 
 void Editor::flood(int tx, int ty, uint16_t from, uint16_t to) {
@@ -358,6 +618,45 @@ void Editor::paintMap(SDL_Renderer* renderer) {
     for (int y = 0; y < stage->height; ++y)
         for (int x = 0; x < stage->width; ++x)
             blitTile(stage->get(stage->front, x, y), x * tileW, y * tileH, 255);
+    if (showCollision_ && set) {
+        for (int y = 0; y < stage->height; ++y) {
+            for (int x = 0; x < stage->width; ++x) {
+                auto flagsOf = [&](int id) -> uint32_t {
+                    if (id <= 0 || id > static_cast<int>(set->tiles.size())) return 0;
+                    return set->tiles[static_cast<size_t>(id - 1)].flags;
+                };
+                const uint32_t flags = flagsOf(stage->get(stage->main, x, y)) | flagsOf(stage->get(stage->front, x, y));
+                uint8_t r = 0, g = 0, b = 0, a = 0;
+                if (flags & TileHazard) {
+                    r = 255;
+                    g = 40;
+                    b = 170;
+                    a = 120;
+                } else if (flags & TileLadder) {
+                    r = 255;
+                    g = 210;
+                    b = 40;
+                    a = 120;
+                } else if (flags & TileOneWay) {
+                    r = 40;
+                    g = 210;
+                    b = 80;
+                    a = 110;
+                } else if (flags & TileSolid) {
+                    r = 255;
+                    g = 70;
+                    b = 50;
+                    a = 100;
+                } else if (flags & TileWater) {
+                    r = 50;
+                    g = 130;
+                    b = 255;
+                    a = 90;
+                }
+                if (a) map_.fillRect(x * tileW, y * tileH, tileW, tileH, r, g, b, a);
+            }
+        }
+    }
     if (grid_ && zoom_ >= 2) {
         for (int x = 0; x < width; x += tileW)
             for (int y = 0; y < height; ++y) map_.pset(x, y, 255, 255, 255, 28);
@@ -372,6 +671,19 @@ void Editor::paintMap(SDL_Renderer* renderer) {
         if (mapTex_) SDL_SetTextureScaleMode(mapTex_, SDL_ScaleModeNearest);
     }
     if (mapTex_) SDL_UpdateTexture(mapTex_, nullptr, map_.pixels().data(), width * 4);
+    if (set && !set->rgba.empty() && set->imgW > 0 && set->imgH > 0) {
+        if (!tilesetTex_ || tilesetTexW_ != set->imgW || tilesetTexH_ != set->imgH) {
+            if (tilesetTex_) SDL_DestroyTexture(tilesetTex_);
+            tilesetTex_ = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, set->imgW, set->imgH);
+            tilesetTexW_ = set->imgW;
+            tilesetTexH_ = set->imgH;
+            if (tilesetTex_) {
+                SDL_SetTextureScaleMode(tilesetTex_, SDL_ScaleModeNearest);
+                SDL_SetTextureBlendMode(tilesetTex_, SDL_BLENDMODE_BLEND);
+            }
+        }
+        if (tilesetTex_) SDL_UpdateTexture(tilesetTex_, nullptr, set->rgba.data(), set->imgW * 4);
+    }
 }
 
 void Editor::drawMenu() {
@@ -425,6 +737,7 @@ void Editor::drawMenu() {
     }
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Grid", nullptr, &grid_);
+        ImGui::MenuItem("Collision colors", nullptr, &showCollision_);
         if (ImGui::MenuItem("Zoom in")) zoom_ = std::min(6, zoom_ + 1);
         if (ImGui::MenuItem("Zoom out")) zoom_ = std::max(1, zoom_ - 1);
         ImGui::EndMenu();
@@ -1097,6 +1410,16 @@ void Editor::stampChunkNext() {
 }
 
 void Editor::drawBuildTab() {
+    if (ImGui::Button("Check this stage", ImVec2(-1.f, 0))) checkLevel();
+    ImGui::Checkbox("Show collision", &showCollision_);
+    if (showCollision_)
+        ImGui::TextWrapped("Red is solid, green is one-way, yellow is a ladder, pink is a hazard, and blue is water.");
+    if (levelChecked_) {
+        ImGui::BeginChild("levelnotes", ImVec2(0.f, 120.f), true);
+        for (const auto& note : levelNotes_) ImGui::BulletText("%s", note.c_str());
+        ImGui::EndChild();
+    }
+    ImGui::Separator();
     ImGui::TextWrapped("Stretches and platforms paint the collision layer. You can move or delete anything afterward.");
     const char* shapes[] = {"Floor", "Pit", "Stairs", "Ladder to a ledge", "Shooter column"};
     ImGui::SetNextItemWidth(-1.f);
@@ -1222,13 +1545,28 @@ void Editor::drawLeft() {
             const int tileH = set ? set->tileH : 16;
             const int count = set ? static_cast<int>(set->tiles.size()) : 0;
             if (ImGui::Selectable("Empty", selectedTile_ == 0)) selectedTile_ = 0;
+            const int columns = set && set->columns > 0 ? set->columns : 8;
             for (int i = 1; i <= count; ++i) {
                 ImGui::PushID(i);
                 const bool on = selectedTile_ == i;
+                const int cell = i - 1;
+                const int col = cell % columns;
+                const int row = cell / columns;
+                if (tilesetTex_ && set && set->imgW > 0 && set->imgH > 0) {
+                    const ImVec2 uv0(col * tileW / static_cast<float>(set->imgW), row * tileH / static_cast<float>(set->imgH));
+                    const ImVec2 uv1((col * tileW + tileW) / static_cast<float>(set->imgW),
+                                     (row * tileH + tileH) / static_cast<float>(set->imgH));
+                    if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.48f, 0.14f, 1.f));
+                    if (ImGui::ImageButton(("tile" + std::to_string(i)).c_str(),
+                                           static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(tilesetTex_)), ImVec2(36.f, 36.f), uv0,
+                                           uv1, ImVec4(0.08f, 0.08f, 0.12f, 1.f)))
+                        selectedTile_ = i;
+                    if (on) ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tile %d", i);
+                    ImGui::SameLine();
+                }
                 if (ImGui::Selectable(("Tile " + std::to_string(i)).c_str(), on)) selectedTile_ = i;
                 ImGui::PopID();
-                (void)tileW;
-                (void)tileH;
             }
             ImGui::EndTabItem();
         }
@@ -1286,6 +1624,49 @@ void Editor::drawLeft() {
                 const std::string file = pickFile(false, "*.wav");
                 if (!file.empty()) importWav(file);
             }
+            ImGui::Separator();
+            ImGui::TextUnformatted("Sound maker");
+            editString("Name", soundName_);
+            const char* styles[] = {"Square beep", "Soft tone", "Slide up", "Slide down", "Noise", "Two notes", "Arpeggio"};
+            ImGui::SetNextItemWidth(-1.f);
+            ImGui::Combo("Style", &soundStyle_, styles, 7);
+            ImGui::SliderInt("Note", &soundNote_, 36, 96);
+            ImGui::SliderFloat("Length", &soundSeconds_, 0.05f, 2.f, "%.2f s");
+            ImGui::Checkbox("Music loop", &soundMusic_);
+            if (ImGui::Button("Make sound", ImVec2(-1.f, 0))) {
+                Sound made = synthMade(uniqueId(project_, soundMusic_ ? "tune" : "blip"), soundName_.empty() ? "Blip" : soundName_,
+                                       soundStyle_, soundNote_, soundSeconds_, soundMusic_);
+                project_.sounds.push_back(std::move(made));
+                selectedSound_ = static_cast<int>(project_.sounds.size()) - 1;
+                audio_.open();
+                audio_.play(&project_.sounds[selectedSound_], 0.8f, project_.sounds[selectedSound_].music);
+                status_ = "Added " + project_.sounds[selectedSound_].name;
+            }
+            if (selectedSound_ >= 0 && selectedSound_ < static_cast<int>(project_.sounds.size()) && currentStage()) {
+                if (ImGui::Button("Use as this stage's music", ImVec2(-1.f, 0))) {
+                    Sound& sound = project_.sounds[selectedSound_];
+                    sound.music = true;
+                    currentStage()->musicId = sound.id;
+                    status_ = "Stage music is " + sound.name;
+                }
+            }
+            auto replaceSound = [&](Sound made) {
+                for (int i = 0; i < static_cast<int>(project_.sounds.size()); ++i) {
+                    if (project_.sounds[static_cast<size_t>(i)].id == made.id) {
+                        project_.sounds[static_cast<size_t>(i)] = std::move(made);
+                        selectedSound_ = i;
+                        return;
+                    }
+                }
+                project_.sounds.push_back(std::move(made));
+                selectedSound_ = static_cast<int>(project_.sounds.size()) - 1;
+            };
+            if (ImGui::Button("Jump", ImVec2(70.f, 0))) replaceSound(synthJump());
+            ImGui::SameLine();
+            if (ImGui::Button("Shoot", ImVec2(70.f, 0))) replaceSound(synthShoot());
+            ImGui::SameLine();
+            if (ImGui::Button("Coin", ImVec2(70.f, 0))) replaceSound(synthCoin());
+            ImGui::TextWrapped("Jump, Shoot, and Coin replace the sounds the game already plays. Make sound adds a new one.");
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Build")) {
@@ -1577,12 +1958,34 @@ void Editor::drawBottom() {
     }
     spriteFrame_ = std::clamp(spriteFrame_, 0, sprite->frames - 1);
     ImGui::SliderInt("Frame", &spriteFrame_, 0, sprite->frames - 1);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
     ImGui::InputFloat("FPS", &sprite->fps);
+    const char* paintTools[] = {"Pencil", "Fill", "Pick", "Line"};
+    for (int i = 0; i < 4; ++i) {
+        if (i) ImGui::SameLine();
+        const bool selected = paintTool_ == i;
+        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.48f, 0.14f, 1.f));
+        if (ImGui::Button(paintTools[i])) paintTool_ = i;
+        if (selected) ImGui::PopStyleColor();
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120);
+    ImGui::SliderInt("Zoom", &paintZoom_, 4, 32);
+    if (spriteFrame_ > 0 && ImGui::Button("Copy previous frame")) {
+        const int previous = (spriteFrame_ - 1) * sprite->frameW;
+        const int current = spriteFrame_ * sprite->frameW;
+        for (int y = 0; y < sprite->frameH; ++y) {
+            std::memcpy(sprite->rgba.data() + (static_cast<size_t>(y) * sprite->imgW + current) * 4,
+                        sprite->rgba.data() + (static_cast<size_t>(y) * sprite->imgW + previous) * 4,
+                        static_cast<size_t>(sprite->frameW) * 4);
+        }
+    }
     for (int i = 0; i < 16; ++i) {
         if (i) ImGui::SameLine();
         ImGui::PushID(i);
         const ImVec4 color(kPalette[i].r / 255.f, kPalette[i].g / 255.f, kPalette[i].b / 255.f, 1.f);
-        if (ImGui::ColorButton("swatch", color, 0, ImVec2(18, 18))) {
+        if (ImGui::ColorButton("swatch", color, colorIndex_ == i ? ImGuiColorEditFlags_None : 0, ImVec2(18, 18))) {
             colorIndex_ = i;
             paintR_ = kPalette[i].r;
             paintG_ = kPalette[i].g;
@@ -1591,49 +1994,133 @@ void Editor::drawBottom() {
         ImGui::PopID();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Erase")) colorIndex_ = -1;
-    ImGui::SameLine();
-    ImGui::TextUnformatted("Left click draws. Right click erases.");
-    const ImVec2 room = ImGui::GetContentRegionAvail();
-    int scale = 8;
-    if (sprite->frameW > 0 && sprite->frameH > 0) {
-        const int fitW = static_cast<int>((room.x - 16.f) / sprite->frameW);
-        const int fitH = static_cast<int>((room.y - 8.f) / sprite->frameH);
-        scale = std::clamp(std::min(fitW, fitH), 4, 16);
+    float custom[3] = {paintR_ / 255.f, paintG_ / 255.f, paintB_ / 255.f};
+    if (ImGui::ColorEdit3("##paint", custom, ImGuiColorEditFlags_NoInputs)) {
+        colorIndex_ = 16;
+        paintR_ = static_cast<uint8_t>(std::clamp(custom[0], 0.f, 1.f) * 255.f);
+        paintG_ = static_cast<uint8_t>(std::clamp(custom[1], 0.f, 1.f) * 255.f);
+        paintB_ = static_cast<uint8_t>(std::clamp(custom[2], 0.f, 1.f) * 255.f);
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Erase")) colorIndex_ = -1;
+    const int scale = std::clamp(paintZoom_, 4, 32);
     const int originX = spriteFrame_ * sprite->frameW;
-    ImGui::BeginChild("pixels", ImVec2(0, 0), true);
+    auto indexOf = [&](int x, int y) -> size_t {
+        return (static_cast<size_t>(y) * sprite->imgW + originX + x) * 4;
+    };
+    auto plot = [&](int x, int y, bool erase) {
+        if (x < 0 || y < 0 || x >= sprite->frameW || y >= sprite->frameH) return;
+        const size_t i = indexOf(x, y);
+        if (i + 3 >= sprite->rgba.size()) return;
+        if (erase || colorIndex_ < 0) {
+            sprite->rgba[i] = sprite->rgba[i + 1] = sprite->rgba[i + 2] = sprite->rgba[i + 3] = 0;
+        } else {
+            sprite->rgba[i] = paintR_;
+            sprite->rgba[i + 1] = paintG_;
+            sprite->rgba[i + 2] = paintB_;
+            sprite->rgba[i + 3] = 255;
+        }
+    };
+    auto sameColor = [&](int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+        const size_t i = indexOf(x, y);
+        return sprite->rgba[i] == r && sprite->rgba[i + 1] == g && sprite->rgba[i + 2] == b && sprite->rgba[i + 3] == a;
+    };
+    auto flood = [&](int x, int y, bool erase) {
+        if (x < 0 || y < 0 || x >= sprite->frameW || y >= sprite->frameH) return;
+        const size_t start = indexOf(x, y);
+        const uint8_t tr = sprite->rgba[start];
+        const uint8_t tg = sprite->rgba[start + 1];
+        const uint8_t tb = sprite->rgba[start + 2];
+        const uint8_t ta = sprite->rgba[start + 3];
+        const uint8_t nr = erase || colorIndex_ < 0 ? 0 : paintR_;
+        const uint8_t ng = erase || colorIndex_ < 0 ? 0 : paintG_;
+        const uint8_t nb = erase || colorIndex_ < 0 ? 0 : paintB_;
+        const uint8_t na = erase || colorIndex_ < 0 ? 0 : 255;
+        if (tr == nr && tg == ng && tb == nb && ta == na) return;
+        std::vector<std::pair<int, int>> stack;
+        stack.push_back({x, y});
+        while (!stack.empty()) {
+            const int cx = stack.back().first;
+            const int cy = stack.back().second;
+            stack.pop_back();
+            if (cx < 0 || cy < 0 || cx >= sprite->frameW || cy >= sprite->frameH || !sameColor(cx, cy, tr, tg, tb, ta)) continue;
+            plot(cx, cy, erase);
+            stack.push_back({cx + 1, cy});
+            stack.push_back({cx - 1, cy});
+            stack.push_back({cx, cy + 1});
+            stack.push_back({cx, cy - 1});
+        }
+    };
+    auto stroke = [&](int x0, int y0, int x1, int y1, bool erase) {
+        int dx = std::abs(x1 - x0);
+        int sx = x0 < x1 ? 1 : -1;
+        int dy = -std::abs(y1 - y0);
+        int sy = y0 < y1 ? 1 : -1;
+        int err = dx + dy;
+        for (;;) {
+            plot(x0, y0, erase);
+            if (x0 == x1 && y0 == y1) break;
+            const int e2 = 2 * err;
+            if (e2 >= dy) {
+                err += dy;
+                x0 += sx;
+            }
+            if (e2 <= dx) {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    };
+    ImGui::BeginChild("pixels", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* draw = ImGui::GetWindowDrawList();
     for (int y = 0; y < sprite->frameH; ++y) {
         for (int x = 0; x < sprite->frameW; ++x) {
-            const size_t i = (static_cast<size_t>(y) * sprite->imgW + originX + x) * 4;
-            ImU32 color = IM_COL32(20, 20, 28, 255);
+            const size_t i = indexOf(x, y);
+            const bool dark = ((x + y) & 1) == 0;
+            ImU32 color = dark ? IM_COL32(32, 32, 40, 255) : IM_COL32(52, 52, 62, 255);
             if (i + 3 < sprite->rgba.size() && sprite->rgba[i + 3] > 0)
                 color = IM_COL32(sprite->rgba[i], sprite->rgba[i + 1], sprite->rgba[i + 2], 255);
             const ImVec2 a(origin.x + x * scale, origin.y + y * scale);
-            const ImVec2 b(a.x + scale - 1, a.y + scale - 1);
+            const ImVec2 b(a.x + scale, a.y + scale);
             draw->AddRectFilled(a, b, color);
         }
     }
     ImGui::Dummy(ImVec2(static_cast<float>(sprite->frameW * scale), static_cast<float>(sprite->frameH * scale)));
-    const bool drawDown = ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left);
-    const bool eraseDown = ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Right);
-    if (drawDown || eraseDown) {
-        const ImVec2 mouse = ImGui::GetIO().MousePos;
-        const int x = static_cast<int>((mouse.x - origin.x) / scale);
-        const int y = static_cast<int>((mouse.y - origin.y) / scale);
-        if (x >= 0 && y >= 0 && x < sprite->frameW && y < sprite->frameH) {
-            const size_t i = (static_cast<size_t>(y) * sprite->imgW + originX + x) * 4;
-            if (eraseDown || colorIndex_ < 0) {
-                sprite->rgba[i] = sprite->rgba[i + 1] = sprite->rgba[i + 2] = sprite->rgba[i + 3] = 0;
-            } else {
-                sprite->rgba[i] = paintR_;
-                sprite->rgba[i + 1] = paintG_;
-                sprite->rgba[i + 2] = paintB_;
-                sprite->rgba[i + 3] = 255;
-            }
+    const bool hovered = ImGui::IsItemHovered();
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const int px = static_cast<int>((mouse.x - origin.x) / scale);
+    const int py = static_cast<int>((mouse.y - origin.y) / scale);
+    const bool inside = px >= 0 && py >= 0 && px < sprite->frameW && py < sprite->frameH;
+    const bool leftClick = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool leftDown = hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const bool rightDown = hovered && ImGui::IsMouseDown(ImGuiMouseButton_Right);
+    if (leftClick && inside && paintTool_ == 3) {
+        paintLine_ = true;
+        paintX0_ = px;
+        paintY0_ = py;
+    }
+    if (paintLine_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        if (inside) stroke(paintX0_, paintY0_, px, py, false);
+        paintLine_ = false;
+    }
+    if (leftClick && inside && paintTool_ == 1) flood(px, py, false);
+    if (rightDown && inside && paintTool_ == 1 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) flood(px, py, true);
+    if (leftClick && inside && paintTool_ == 2) {
+        const size_t i = indexOf(px, py);
+        if (sprite->rgba[i + 3] == 0) colorIndex_ = -1;
+        else {
+            colorIndex_ = 16;
+            paintR_ = sprite->rgba[i];
+            paintG_ = sprite->rgba[i + 1];
+            paintB_ = sprite->rgba[i + 2];
         }
+    }
+    if (inside && paintTool_ == 0 && (leftDown || rightDown)) plot(px, py, rightDown);
+    if (paintLine_ && inside) {
+        const ImVec2 a(origin.x + (paintX0_ + 0.5f) * scale, origin.y + (paintY0_ + 0.5f) * scale);
+        const ImVec2 b(origin.x + (px + 0.5f) * scale, origin.y + (py + 0.5f) * scale);
+        draw->AddLine(a, b, IM_COL32(paintR_, paintG_, paintB_, 255), 2.f);
     }
     ImGui::EndChild();
 }
@@ -1648,7 +2135,7 @@ void Editor::draw(SDL_Renderer* renderer) {
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
     drawMenu();
     drawToolbar();
-    const float bottom = selectedSprite() ? std::min(360.f, std::max(180.f, io.DisplaySize.y * 0.38f)) : 64.f;
+    const float bottom = selectedSprite() ? std::min(440.f, std::max(240.f, io.DisplaySize.y * 0.42f)) : 64.f;
     ImGui::TextWrapped("%s", status_.c_str());
     ImGui::BeginChild("left", ImVec2(320, -bottom), true);
     drawLeft();
@@ -1686,6 +2173,7 @@ void Editor::draw(SDL_Renderer* renderer) {
         if (ImGui::IsKeyPressed(ImGuiKey_5)) tool_ = 4;
         if (ImGui::IsKeyPressed(ImGuiKey_6)) tool_ = 5;
     }
+    trackUndo();
 }
 
 void Editor::togglePlay() {

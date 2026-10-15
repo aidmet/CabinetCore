@@ -11,6 +11,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -44,19 +45,34 @@ void applyStyle() {
     colors[ImGuiCol_SliderGrab] = ImVec4(0.95f, 0.62f, 0.18f, 1.f);
 }
 
-cc::Input pollPlay(const Uint8* keys, bool& prevJump, bool& prevShoot, bool& prevStart, bool& prevPause, bool& prevQuit,
-                   bool& prevRestart) {
+cc::Input pollPlay(const Uint8* keys, SDL_GameController* pad, bool& prevJump, bool& prevShoot, bool& prevStart,
+                   bool& prevPause, bool& prevQuit, bool& prevRestart) {
     cc::Input input;
     if (keys[SDL_SCANCODE_LEFT] || keys[SDL_SCANCODE_A]) input.axisX -= 1.f;
     if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D]) input.axisX += 1.f;
     if (keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_W]) input.axisY -= 1.f;
     if (keys[SDL_SCANCODE_DOWN] || keys[SDL_SCANCODE_S]) input.axisY += 1.f;
-    const bool jump = keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_SPACE];
-    const bool shoot = keys[SDL_SCANCODE_X] || keys[SDL_SCANCODE_LCTRL];
-    const bool start = keys[SDL_SCANCODE_RETURN];
-    const bool pause = keys[SDL_SCANCODE_ESCAPE];
+    bool jump = keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_SPACE];
+    bool shoot = keys[SDL_SCANCODE_X] || keys[SDL_SCANCODE_LCTRL];
+    bool start = keys[SDL_SCANCODE_RETURN];
+    bool pause = keys[SDL_SCANCODE_ESCAPE];
     const bool quit = keys[SDL_SCANCODE_Q];
     const bool restart = keys[SDL_SCANCODE_R];
+    if (pad) {
+        const int ax = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
+        const int ay = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+        if (std::abs(ax) > 8000) input.axisX = ax / 32767.f;
+        if (std::abs(ay) > 8000) input.axisY = ay / 32767.f;
+        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) input.axisX = -1.f;
+        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) input.axisX = 1.f;
+        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP)) input.axisY = -1.f;
+        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) input.axisY = 1.f;
+        jump = jump || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A);
+        shoot = shoot || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) ||
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B);
+        start = start || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START);
+        pause = pause || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK);
+    }
     input.jump = jump;
     input.shoot = shoot;
     input.start = start;
@@ -168,6 +184,13 @@ int main(int argc, char** argv) {
 
     SDL_Texture* playTex = nullptr;
     int playW = 0, playH = 0;
+    SDL_GameController* pad = nullptr;
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (SDL_IsGameController(i)) {
+            pad = SDL_GameControllerOpen(i);
+            break;
+        }
+    }
     bool prevF5 = false;
     bool prevJump = false, prevShoot = false, prevStart = false, prevPause = false, prevQuit = false, prevRestart = false;
     bool running = true;
@@ -181,6 +204,13 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&event)) {
             if (!editor.playing()) ImGui_ImplSDL2_ProcessEvent(&event);
             if (event.type == SDL_QUIT) running = false;
+            if (event.type == SDL_CONTROLLERDEVICEADDED && !pad && SDL_IsGameController(event.cdevice.which))
+                pad = SDL_GameControllerOpen(event.cdevice.which);
+            if (event.type == SDL_CONTROLLERDEVICEREMOVED && pad &&
+                SDL_GameControllerFromInstanceID(event.cdevice.which) == pad) {
+                SDL_GameControllerClose(pad);
+                pad = nullptr;
+            }
             if (event.type == SDL_DROPFILE) {
                 editor.dropFile(event.drop.file);
                 SDL_free(event.drop.file);
@@ -198,7 +228,8 @@ int main(int argc, char** argv) {
 
         if (editor.playing()) {
             while (acc >= 1.0 / 60.0) {
-                editor.updatePlay(1.f / 60.f, pollPlay(keys, prevJump, prevShoot, prevStart, prevPause, prevQuit, prevRestart));
+                editor.updatePlay(1.f / 60.f,
+                                  pollPlay(keys, pad, prevJump, prevShoot, prevStart, prevPause, prevQuit, prevRestart));
                 acc -= 1.0 / 60.0;
             }
             editor.renderPlay();
@@ -241,6 +272,7 @@ int main(int argc, char** argv) {
     }
 
     if (playTex) SDL_DestroyTexture(playTex);
+    if (pad) SDL_GameControllerClose(pad);
     ImGui_ImplSDLRenderer2_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();

@@ -32,12 +32,8 @@ public:
 
 private:
     struct Snapshot {
-        int width = 0;
-        int height = 0;
-        std::vector<uint16_t> main;
-        std::vector<uint16_t> back;
-        std::vector<uint16_t> front;
-        std::vector<Placement> placements;
+        Project project;
+        int stageIndex = 0;
     };
 
     Stage* currentStage();
@@ -45,8 +41,12 @@ private:
     std::vector<uint16_t>& activeLayer();
     void ensureLayers(Stage& stage);
     void pushUndo();
+    void pushState(const Project& state);
+    void restore(const Snapshot& snap);
+    void trackUndo();
     void undo();
     void redo();
+    void checkLevel();
     void paintMap(SDL_Renderer* renderer);
     void drawMenu();
     void drawToolbar();
@@ -97,7 +97,17 @@ private:
     std::string title_;
     std::vector<Snapshot> undo_;
     std::vector<Snapshot> redo_;
+    Project before_;
+    bool undoReady_ = false;
+    bool undoBusy_ = false;
+    bool undoUsed_ = false;
+    std::vector<std::string> levelNotes_;
+    bool levelChecked_ = false;
+    bool showCollision_ = false;
     SDL_Texture* mapTex_ = nullptr;
+    SDL_Texture* tilesetTex_ = nullptr;
+    int tilesetTexW_ = 0;
+    int tilesetTexH_ = 0;
     int mapTexW_ = 0;
     int mapTexH_ = 0;
     int stageIndex_ = 0;
@@ -113,6 +123,16 @@ private:
     int dragX_ = -1;
     int dragY_ = -1;
     int colorIndex_ = 1;
+    int paintTool_ = 0;
+    int paintZoom_ = 12;
+    bool paintLine_ = false;
+    int paintX0_ = -1;
+    int paintY0_ = -1;
+    int soundStyle_ = 0;
+    int soundNote_ = 72;
+    float soundSeconds_ = 0.25f;
+    bool soundMusic_ = false;
+    std::string soundName_ = "Blip";
     bool grid_ = true;
     bool playing_ = false;
     bool stroking_ = false;

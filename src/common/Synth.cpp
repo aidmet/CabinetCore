@@ -124,6 +124,39 @@ Sound synthMusic(const std::string& id, const std::string& name, const int* note
     return finish(id, name, std::move(s), true);
 }
 
+Sound synthMade(const std::string& id, const std::string& name, int style, int note, float seconds, bool music) {
+    std::vector<int16_t> samples;
+    const int midi = std::clamp(note, 24, 108);
+    const double freq = midiFreq(midi);
+    const double dur = std::clamp(static_cast<double>(seconds), 0.05, 4.0);
+    if (style == 4) {
+        samples.assign(static_cast<size_t>(kRate * dur), 0);
+        uint32_t n = 1664525u + static_cast<uint32_t>(midi * 97);
+        for (size_t i = 0; i < samples.size(); ++i) {
+            n = n * 1664525u + 1013904223u;
+            const double env = 1.0 - static_cast<double>(i) / samples.size();
+            const double noise = ((n >> 16) & 0xFFFF) / 65535.0 * 2.0 - 1.0;
+            samples[i] = static_cast<int16_t>(std::clamp(noise * 14000.0 * env, -32767.0, 32767.0));
+        }
+    } else if (style == 2 || style == 3) {
+        const int steps = 8;
+        for (int i = 0; i < steps; ++i) {
+            const int shifted = style == 2 ? midi + i * 2 : midi - i * 2;
+            mixNote(samples, i * dur / steps, dur / steps * 1.15, midiFreq(std::clamp(shifted, 24, 108)), 0.34, 1);
+        }
+    } else if (style == 5) {
+        mixNote(samples, 0, dur * 0.45, freq, 0.34, 1);
+        mixNote(samples, dur * 0.4, dur * 0.6, midiFreq(std::min(108, midi + 7)), 0.34, 1);
+    } else if (style == 6) {
+        const int notes[] = {midi, midi + 4, midi + 7};
+        for (int i = 0; i < 3; ++i) mixNote(samples, i * dur / 3.0, dur / 2.2, midiFreq(std::min(108, notes[i])), 0.32, 1);
+    } else {
+        mixNote(samples, 0, dur, freq, 0.36, style == 1 ? 0 : 1);
+    }
+    if (samples.empty()) samples.resize(kRate / 8, 0);
+    return finish(id, name, std::move(samples), music);
+}
+
 void addStandardSounds(Project& project) {
     project.sounds.push_back(synthJump());
     project.sounds.push_back(synthShoot());
