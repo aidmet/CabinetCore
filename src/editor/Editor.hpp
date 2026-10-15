@@ -117,6 +117,7 @@ private:
     void drawSelfTest();
     void zoomIn();
     void zoomOut();
+    float snapCoord(float value, int tile) const;
     Tileset* tileset();
     Sprite* selectedSprite();
 
@@ -179,6 +180,7 @@ private:
     bool soundMusic_ = false;
     std::string soundName_ = "Blip";
     bool grid_ = true;
+    bool snapActors_ = false;
     bool playing_ = false;
     bool stroking_ = false;
     bool draggingActor_ = false;

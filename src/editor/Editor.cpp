@@ -750,6 +750,7 @@ void Editor::drawMenu() {
     }
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Grid", nullptr, &grid_);
+        ImGui::MenuItem("Snap to grid", nullptr, &snapActors_);
         ImGui::MenuItem("Collision colors", nullptr, &showCollision_);
         ImGui::MenuItem("Hitboxes in playtest", "F3", &showHitboxes_);
         if (ImGui::MenuItem("Zoom in")) zoomIn();
@@ -764,6 +765,12 @@ void Editor::drawMenu() {
         ImGui::EndMenu();
     }
     ImGui::EndMenuBar();
+}
+
+float Editor::snapCoord(float value, int tile) const {
+    if (!snapActors_ || tile <= 0) return value;
+    const float step = static_cast<float>(tile);
+    return std::round(value / step) * step;
 }
 
 void Editor::zoomIn() { zoom_ = std::min(6, zoom_ + 1); }
@@ -784,6 +791,9 @@ void Editor::drawToolbar() {
     if (ImGui::Button("Playtest  F5")) togglePlay();
     ImGui::SameLine();
     ImGui::Checkbox("Hitboxes", &showHitboxes_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Snap", &snapActors_);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Actors and the hero land on the tile grid while you move them.");
     ImGui::SameLine();
     if (ImGui::Button("Build  F6")) buildGame();
     ImGui::SameLine();
@@ -1813,8 +1823,9 @@ void Editor::drawCanvas() {
                 pushUndo();
                 draggingActor_ = true;
             }
-            stage->placements[selectedPlacement_].x = localX - tileW * 0.5f;
-            stage->placements[selectedPlacement_].y = localY - tileH * 0.5f;
+            Placement& placement = stage->placements[selectedPlacement_];
+            placement.x = snapCoord(localX - tileW * 0.5f, tileW);
+            placement.y = snapCoord(localY - tileH * 0.5f, tileH);
         }
         if (release) {
             stroking_ = false;
@@ -1956,8 +1967,13 @@ void Editor::drawInspector() {
     if (selectedPlacement_ >= 0 && selectedPlacement_ < static_cast<int>(stage->placements.size())) {
         if (ImGui::CollapsingHeader("Placed actor", ImGuiTreeNodeFlags_DefaultOpen)) {
             Placement& placement = stage->placements[selectedPlacement_];
-            ImGui::InputFloat("X", &placement.x);
-            ImGui::InputFloat("Y", &placement.y);
+            const Tileset* set = tileset();
+            const int tileW = set && set->tileW > 0 ? set->tileW : 16;
+            const int tileH = set && set->tileH > 0 ? set->tileH : 16;
+            float x = placement.x;
+            float y = placement.y;
+            if (ImGui::InputFloat("X", &x)) placement.x = snapCoord(x, tileW);
+            if (ImGui::InputFloat("Y", &y)) placement.y = snapCoord(y, tileH);
             if (ImGui::BeginCombo("Actor", placement.actorId.c_str())) {
                 for (const auto& actor : project_.actors) {
                     if (ImGui::Selectable(actor.name.c_str(), actor.id == placement.actorId)) placement.actorId = actor.id;

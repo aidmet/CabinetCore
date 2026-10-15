@@ -131,6 +131,7 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
     const uint8_t savedB = paintB_;
     const int savedPaintTool = paintTool_;
     const bool savedGrid = grid_;
+    const bool savedSnap = snapActors_;
     const bool savedCollision = showCollision_;
     const bool savedHitboxes = showHitboxes_;
     const int savedPaintTarget = paintTarget_;
@@ -193,6 +194,7 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
         paintB_ = savedB;
         paintTool_ = savedPaintTool;
         grid_ = savedGrid;
+        snapActors_ = savedSnap;
         showCollision_ = savedCollision;
         showHitboxes_ = savedHitboxes;
         paintTarget_ = savedPaintTarget;
@@ -435,6 +437,12 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
             selectedActor_ = -1;
             applyTool(7, 7, true, true);
             expect("Stamp with no actor selected does nothing", static_cast<int>(currentStage()->placements.size()) == placed + 1, "");
+            snapActors_ = false;
+            expect("An actor can sit between tiles", snapCoord(20.4f, 16) == 20.4f && snapCoord(30.2f, 16) == 30.2f, "");
+            snapActors_ = true;
+            expect("Snap moves an actor onto the tile grid", snapCoord(20.4f, 16) == 16.f && snapCoord(30.2f, 16) == 32.f, "");
+            expect("Snap moves the hero onto the tile grid", snapCoord(8.2f, 16) == 16.f, "");
+            snapActors_ = false;
         }
 
         fresh();
