@@ -2617,7 +2617,13 @@ void Editor::drawSheetPainter(std::vector<uint8_t>& rgba, int imgW, int ox, int 
     ImGui::NewLine();
     const int scale = std::clamp(paintZoom_, 4, 32);
     auto indexOf = [&](int x, int y) -> size_t { return (static_cast<size_t>(oy + y) * imgW + ox + x) * 4; };
-    ImGui::BeginChild("pixels", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+    const float pictureW = static_cast<float>(w * scale);
+    const float pictureH = static_cast<float>(h * scale);
+    const ImVec2 room = ImGui::GetContentRegionAvail();
+    const float pad = ImGui::GetStyle().WindowPadding.y * 2.f + 6.f;
+    const float childW = std::max(32.f, std::min(pictureW + pad, std::max(32.f, room.x)));
+    const float childH = std::max(32.f, std::min(pictureH + pad, std::max(32.f, room.y)));
+    ImGui::BeginChild("pixels", ImVec2(childW, childH), true, ImGuiWindowFlags_HorizontalScrollbar);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* draw = ImGui::GetWindowDrawList();
     for (int y = 0; y < h; ++y) {
@@ -2762,7 +2768,19 @@ void Editor::draw(SDL_Renderer* renderer) {
     const float maxInspector = std::max(minInspector, availX - shownLeft - minCanvas - split * 2.f);
     const float shownInspector = clampLayout(layoutInspector_, minInspector, maxInspector);
     const float canvasW = std::max(1.f, availX - shownLeft - shownInspector - split * 2.f);
-    const float autoPaint = std::min(300.f, std::max(220.f, io.DisplaySize.y * 0.32f));
+    int paintPixels = 16;
+    if (painter) {
+        if (paintTarget_ == 1) {
+            if (const Tileset* set = tileset())
+                if (set->tileH > 0) paintPixels = set->tileH;
+        } else if (const Sprite* sprite = selectedSprite()) {
+            if (sprite->frameH > 0) paintPixels = sprite->frameH;
+        }
+    }
+    const float picture = static_cast<float>(std::clamp(paintZoom_, 4, 32) * paintPixels);
+    const float wantedPaint = picture + 200.f;
+    const float maxPaint = std::max(minBottom, availY - 180.f - split);
+    const float autoPaint = std::min(wantedPaint, maxPaint);
     const float desiredBottom = painter ? (layoutBottomPaint_ < 0.f ? autoPaint : layoutBottomPaint_) : layoutBottom_;
     const float maxBottom = std::max(minBottom, availY - minTop - split);
     const float shownBottom = clampLayout(desiredBottom, minBottom, maxBottom);
