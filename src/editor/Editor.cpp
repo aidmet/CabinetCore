@@ -810,8 +810,8 @@ void Editor::drawMenu() {
         ImGui::MenuItem("Snap to grid", nullptr, &snapActors_);
         ImGui::MenuItem("Collision colors", nullptr, &showCollision_);
         ImGui::MenuItem("Hitboxes in playtest", "F3", &showHitboxes_);
-        if (ImGui::MenuItem("Zoom in")) zoomIn();
-        if (ImGui::MenuItem("Zoom out")) zoomOut();
+        if (ImGui::MenuItem("Zoom in", "Ctrl+Wheel")) zoomIn();
+        if (ImGui::MenuItem("Zoom out", "Ctrl+Wheel")) zoomOut();
         ImGui::Separator();
         if (ImGui::MenuItem("Save layout")) saveLayout();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keep these panel sizes. The editor opens with them next time.");
@@ -838,6 +838,11 @@ float Editor::snapCoord(float value, int tile) const {
 void Editor::zoomIn() { zoom_ = std::min(6, zoom_ + 1); }
 
 void Editor::zoomOut() { zoom_ = std::max(1, zoom_ - 1); }
+
+void Editor::zoomWheel(float wheel) {
+    if (wheel > 0.f) zoomIn();
+    else if (wheel < 0.f) zoomOut();
+}
 
 void Editor::loadLayout() {
     const std::string file = layoutFile();
@@ -906,6 +911,7 @@ void Editor::drawToolbar() {
     if (ImGui::Button("Build  F6")) buildGame();
     ImGui::SameLine();
     ImGui::Text("Zoom %d", zoom_);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl+Wheel over the scene zooms in and out.");
     ImGui::SameLine();
     ImGui::RadioButton("Backdrop", &layer_, 0);
     ImGui::SameLine();
@@ -1858,6 +1864,7 @@ void Editor::drawLeft() {
 }
 
 void Editor::drawCanvas() {
+    if (ImGui::IsWindowHovered() && ImGui::GetIO().KeyCtrl) zoomWheel(ImGui::GetIO().MouseWheel);
     Stage* stage = currentStage();
     if (!stage || !mapTex_) {
         ImGui::TextUnformatted("No stage");

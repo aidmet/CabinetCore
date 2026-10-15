@@ -117,6 +117,7 @@ private:
     void drawSelfTest();
     void zoomIn();
     void zoomOut();
+    void zoomWheel(float wheel);
     void loadLayout();
     void saveLayout();
     void resetLayout();
