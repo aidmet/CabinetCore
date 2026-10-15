@@ -129,6 +129,9 @@ int Editor::runSelfTest(SDL_Renderer* renderer) {
     const int savedPaintTool = paintTool_;
     const bool savedGrid = grid_;
     const bool savedCollision = showCollision_;
+    const bool savedHitboxes = showHitboxes_;
+    const int savedPaintTarget = paintTarget_;
+    const bool savedSuspend = undoSuspend_;
     const bool savedBlocks = blocksOpen_;
     const int savedBlockActor = blockActor_;
     const int savedBlockScript = blockScript_;
@@ -188,6 +191,9 @@ int Editor::runSelfTest(SDL_Renderer* renderer) {
         paintTool_ = savedPaintTool;
         grid_ = savedGrid;
         showCollision_ = savedCollision;
+        showHitboxes_ = savedHitboxes;
+        paintTarget_ = savedPaintTarget;
+        undoSuspend_ = savedSuspend;
         blocksOpen_ = savedBlocks;
         blockActor_ = savedBlockActor;
         blockScript_ = savedBlockScript;
@@ -741,6 +747,106 @@ int Editor::runSelfTest(SDL_Renderer* renderer) {
         }
 
         fresh();
+        undoSuspend_ = false;
+        if (Tileset* set = tileset()) {
+            expect("The tileset has a picture to paint", set->tileW > 0 && set->imgW >= set->tileW && !set->rgba.empty(), "");
+            const int columns = std::max(1, set->columns);
+            const int index = 0;
+            const int ox = (index % columns) * set->tileW;
+            const int oy = (index / columns) * set->tileH;
+            const size_t pixel = (static_cast<size_t>(oy) * set->imgW + ox) * 4;
+            const size_t neighbor = (static_cast<size_t>(oy) * set->imgW + ox + set->tileW) * 4;
+            const uint8_t before = set->rgba[pixel];
+            const uint8_t kept = neighbor + 3 < set->rgba.size() ? set->rgba[neighbor] : 0;
+            const int imgW = set->imgW;
+            const int imgH = set->imgH;
+            const uint8_t ink = before == 211 ? static_cast<uint8_t>(19) : static_cast<uint8_t>(211);
+            const int undos = static_cast<int>(undo_.size());
+            pushUndo();
+            colorIndex_ = 3;
+            paintR_ = ink;
+            paintG_ = 4;
+            paintB_ = 5;
+            plotSheet(set->rgba, set->imgW, ox, oy, set->tileW, set->tileH, 0, 0, false);
+            expect("Painting a tile changes that tile's pixel", pixel < set->rgba.size() && set->rgba[pixel] == ink, "");
+            expect("Painting a tile leaves the next tile alone", neighbor + 3 >= set->rgba.size() || set->rgba[neighbor] == kept, "");
+            expect("Painting a tile keeps the sheet size", set->imgW == imgW && set->imgH == imgH, "");
+            floodSheet(set->rgba, set->imgW, ox, oy, set->tileW, set->tileH, 1, 1, false);
+            expect("Filling a tile stays inside that tile", neighbor + 3 >= set->rgba.size() || set->rgba[neighbor] == kept, "");
+            undo();
+            expect("Undo puts the tile picture back", tileset() && tileset()->rgba[pixel] == before, "");
+            expect("A tile stroke is one undo", static_cast<int>(undo_.size()) == undos, "");
+        } else {
+            expect("The tileset has a picture to paint", false, "No tileset.");
+        }
+
+        fresh();
+        currentStage()->set(currentStage()->main, 0, 0, 9);
+        buildStage();
+        {
+            bool heroPlaced = false;
+            int solid = 0;
+            for (const auto& placement : currentStage()->placements) {
+                const ActorDef* actor = project_.findActor(placement.actorId);
+                if (actor && actor->kind == ActorKind::Hero) heroPlaced = true;
+            }
+            for (int y = 0; y < currentStage()->height; ++y)
+                for (int x = 0; x < currentStage()->width; ++x)
+                    if (standable(*currentStage(), x, y)) solid++;
+            expect("Build a stage places a hero on solid ground", heroPlaced && solid > 10 && mainAt(0, 0) != 9, status_);
+            expect("Build a stage is a single undo", undo_.size() == 1 && !undoSuspend_, "");
+            expect("A built platform stage is won at the exit", currentStage()->complete == CompleteMode::TouchExit, "");
+        }
+        undo();
+        expect("Undo restores the stage from before the build", mainAt(0, 0) == 9 && undo_.empty(), "");
+
+        fresh();
+        currentStage()->physics = PhysicsMode::Maze;
+        buildStage();
+        expect("A maze stage gets walls and a collect goal",
+               currentStage()->complete == CompleteMode::CollectAll && mainAt(0, 0) != 0 && mainAt(1, 1) == 0, status_);
+        undo();
+
+        fresh();
+        currentStage()->physics = PhysicsMode::ShooterVert;
+        buildStage();
+        {
+            bool heroPlaced = false;
+            int solid = 0;
+            for (const auto& placement : currentStage()->placements) {
+                const ActorDef* actor = project_.findActor(placement.actorId);
+                if (actor && actor->kind == ActorKind::Hero) heroPlaced = true;
+            }
+            for (int y = 0; y < currentStage()->height; ++y)
+                for (int x = 0; x < currentStage()->width; ++x)
+                    if (mainAt(x, y) != 0) solid++;
+            expect("A vertical shooter stage gets columns and a hero",
+                   heroPlaced && solid > 0 && currentStage()->complete == CompleteMode::ReachEnd, status_);
+        }
+        undo();
+
+        fresh();
+        currentStage()->physics = PhysicsMode::TopDown;
+        buildStage();
+        expect("A top-down stage gets a border and an exit goal",
+               currentStage()->complete == CompleteMode::TouchExit && mainAt(0, 0) != 0 && mainAt(2, 2) == 0, status_);
+        undo();
+
+        fresh();
+        currentStage()->intermission = true;
+        const int placements = static_cast<int>(currentStage()->placements.size());
+        buildStage();
+        expect("Build a stage leaves a message screen alone",
+               currentStage()->intermission && static_cast<int>(currentStage()->placements.size()) == placements && undo_.empty(), status_);
+
+        fresh();
+        if (Tileset* set = tileset()) {
+            for (auto& tile : set->tiles) tile.flags = 0;
+            buildStage();
+            expect("Build a stage needs a solid tile", undo_.empty() && status_.find("solid") != std::string::npos, status_);
+        }
+
+        fresh();
         for (int style = 0; style < 7; ++style) {
             const Sound sound = synthMade("tone", "Tone", style, 72, 0.2f, false);
             expect("Sound style " + std::to_string(style) + " produces audio", !sound.samples.empty(), "");
@@ -871,6 +977,27 @@ int Editor::runSelfTest(SDL_Renderer* renderer) {
         expect("Playtest draws the screen", playWidth() > 0 && playHeight() > 0 &&
                                                 playPixels().size() == static_cast<size_t>(playWidth()) * playHeight() * 4,
                "");
+        auto magenta = [&]() {
+            int count = 0;
+            const auto& pixels = playPixels();
+            for (size_t i = 0; i + 2 < pixels.size(); i += 4)
+                if (pixels[i] == 255 && pixels[i + 1] == 0 && pixels[i + 2] == 180) count++;
+            return count;
+        };
+        showHitboxes_ = false;
+        renderPlay();
+        const int hidden = magenta();
+        showHitboxes_ = true;
+        renderPlay();
+        const int shown = magenta();
+        expect("Hitboxes can be shown in playtest", shown > hidden, "");
+        showHitboxes_ = false;
+        renderPlay();
+        expect("Hitboxes stay hidden until they are turned on", magenta() <= hidden, "");
+        toggleHitboxes();
+        expect("The hitbox switch turns the overlay on", showHitboxes_, "");
+        toggleHitboxes();
+        expect("The hitbox switch turns the overlay off", !showHitboxes_, "");
         togglePlay();
         expect("Leaving playtest returns to the editor", !playing_, "");
 

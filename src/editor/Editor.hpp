@@ -30,6 +30,7 @@ public:
     int runSelfTest(SDL_Renderer* renderer = nullptr);
     const std::vector<SelfCheck>& selfChecks() const { return selfChecks_; }
     void togglePlay();
+    void toggleHitboxes();
     void updatePlay(float dt, const Input& input);
     void renderPlay();
     const std::vector<uint8_t>& playPixels() const;
@@ -103,6 +104,13 @@ private:
     void strokeSprite(Sprite& sprite, int frame, int x0, int y0, int x1, int y1, bool erase);
     void copySpriteFrame(Sprite& sprite, int frame);
     void pickSprite(Sprite& sprite, int frame, int x, int y);
+    void plotSheet(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h, int x, int y, bool erase);
+    void floodSheet(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h, int x, int y, bool erase);
+    void strokeSheet(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h, int x0, int y0, int x1, int y1,
+                     bool erase);
+    void pickSheet(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h, int x, int y);
+    void drawSheetPainter(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h);
+    void buildStage();
     void drawSelfTest();
     Tileset* tileset();
     Sprite* selectedSprite();
@@ -120,9 +128,12 @@ private:
     bool undoReady_ = false;
     bool undoBusy_ = false;
     bool undoUsed_ = false;
+    bool undoSuspend_ = false;
     std::vector<std::string> levelNotes_;
     bool levelChecked_ = false;
     bool showCollision_ = false;
+    bool showHitboxes_ = false;
+    int paintTarget_ = 0;
     std::vector<SelfCheck> selfChecks_;
     bool selfTestOpen_ = false;
     SDL_Renderer* drawRenderer_ = nullptr;

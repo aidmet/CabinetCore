@@ -15,6 +15,7 @@ public:
     void start(const Project& project, int stageIndex = 0, const std::string& scorePath = {}, bool inGame = false);
     void update(float dt, const Input& input);
     void render();
+    void drawHitboxes();
 
     const std::vector<uint8_t>& pixels() const { return canvas_.pixels(); }
     int width() const { return canvas_.width(); }

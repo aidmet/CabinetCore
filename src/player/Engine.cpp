@@ -2034,4 +2034,88 @@ void Engine::render() {
     drawOverlay();
 }
 
+void Engine::drawHitboxes() {
+    if (phase_ == Phase::Title) return;
+    const Stage* st = stage();
+    if (!st) return;
+    int shakeX = 0;
+    int shakeY = 0;
+    if (shake_ > 0.f) {
+        shakeX = static_cast<int>(std::sin(time_ * 90.f) * shake_ * 7.f);
+        shakeY = static_cast<int>(std::cos(time_ * 70.f) * shake_ * 5.f);
+    }
+    const int camX = static_cast<int>(std::lround(camX_)) + shakeX;
+    const int camY = static_cast<int>(std::lround(camY_)) + shakeY;
+    const int x0 = std::max(0, camX / std::max(1, tileW_) - 1);
+    const int y0 = std::max(0, camY / std::max(1, tileH_) - 1);
+    const int x1 = std::min(st->width - 1, (camX + canvas_.width()) / std::max(1, tileW_) + 1);
+    const int y1 = std::min(st->height - 1, (camY + canvas_.height()) / std::max(1, tileH_) + 1);
+    for (int ty = y0; ty <= y1; ++ty) {
+        for (int tx = x0; tx <= x1; ++tx) {
+            const uint32_t flags = flagsAt(tx, ty);
+            uint8_t r = 0, g = 0, b = 0, a = 0;
+            if (flags & TileHazard) {
+                r = 255;
+                g = 40;
+                b = 170;
+                a = 90;
+            } else if (flags & TileLadder) {
+                r = 255;
+                g = 210;
+                b = 40;
+                a = 90;
+            } else if (flags & TileOneWay) {
+                r = 40;
+                g = 210;
+                b = 80;
+                a = 80;
+            } else if (flags & TileSolid) {
+                r = 255;
+                g = 70;
+                b = 50;
+                a = 70;
+            } else if (flags & TileWater) {
+                r = 50;
+                g = 130;
+                b = 255;
+                a = 70;
+            }
+            if (a) canvas_.fillRect(tx * tileW_ - camX, ty * tileH_ - camY, tileW_, tileH_, r, g, b, a);
+        }
+    }
+    auto outline = [&](Box box, uint8_t r, uint8_t g, uint8_t b) {
+        const int x = static_cast<int>(std::lround(box.x)) - camX;
+        const int y = static_cast<int>(std::lround(box.y)) - camY;
+        const int w = std::max(1, static_cast<int>(std::lround(box.w)));
+        const int h = std::max(1, static_cast<int>(std::lround(box.h)));
+        canvas_.fillRect(x, y, w, 1, r, g, b);
+        canvas_.fillRect(x, y + h - 1, w, 1, r, g, b);
+        canvas_.fillRect(x, y, 1, h, r, g, b);
+        canvas_.fillRect(x + w - 1, y, 1, h, r, g, b);
+    };
+    if (phase_ != Phase::Intermission && hero_) outline(playerBox(), 255, 0, 180);
+    for (const auto& ent : ents_) {
+        if (!ent.alive || !ent.def) continue;
+        uint8_t r = 180, g = 180, b = 180;
+        if (ent.projectile || ent.def->kind == ActorKind::Gun) {
+            r = 255;
+            g = 255;
+            b = 255;
+        } else if (ent.def->kind == ActorKind::Enemy || ent.def->kind == ActorKind::Boss) {
+            r = 255;
+            g = 60;
+            b = 60;
+        } else if (ent.def->kind == ActorKind::Item) {
+            r = 80;
+            g = 230;
+            b = 120;
+        } else if (ent.def->kind == ActorKind::Check) {
+            r = 80;
+            g = 200;
+            b = 255;
+        }
+        outline(entBox(ent), r, g, b);
+    }
+}
+
 }  // namespace cc

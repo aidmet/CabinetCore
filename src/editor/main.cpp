@@ -217,6 +217,7 @@ int main(int argc, char** argv) {
         }
     }
     bool prevF5 = false;
+    bool prevF3 = false;
     bool prevJump = false, prevShoot = false, prevStart = false, prevPause = false, prevQuit = false, prevRestart = false;
     bool running = true;
     int frames = 0;
@@ -245,6 +246,9 @@ int main(int argc, char** argv) {
         const bool f5 = keys[SDL_SCANCODE_F5] != 0;
         if (f5 && !prevF5) editor.togglePlay();
         prevF5 = f5;
+        const bool f3 = keys[SDL_SCANCODE_F3] != 0;
+        if (f3 && !prevF3) editor.toggleHitboxes();
+        prevF3 = f3;
 
         const uint64_t now = SDL_GetPerformanceCounter();
         acc += static_cast<double>(now - last) / freq;

@@ -286,6 +286,10 @@ uint32_t projectHash(const Project& project) {
         hash = mixHash(hash, crc32(sprite.rgba.data(), sprite.rgba.size()));
     }
     for (const auto& tile : project.tilesets) {
+        hash = mixText(hash, tile.id);
+        hash = mixHash(hash, static_cast<uint32_t>(tile.imgW));
+        hash = mixHash(hash, static_cast<uint32_t>(tile.imgH));
+        hash = mixHash(hash, crc32(tile.rgba.data(), tile.rgba.size()));
         for (const auto& def : tile.tiles) {
             hash = mixHash(hash, def.flags);
             hash = mixHash(hash, static_cast<uint32_t>(def.damage));
@@ -312,6 +316,7 @@ void Editor::pushState(const Project& state) {
 }
 
 void Editor::pushUndo() {
+    if (undoSuspend_) return;
     pushState(project_);
     undoUsed_ = true;
 }
@@ -739,6 +744,7 @@ void Editor::drawMenu() {
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Grid", nullptr, &grid_);
         ImGui::MenuItem("Collision colors", nullptr, &showCollision_);
+        ImGui::MenuItem("Hitboxes in playtest", "F3", &showHitboxes_);
         if (ImGui::MenuItem("Zoom in")) zoom_ = std::min(6, zoom_ + 1);
         if (ImGui::MenuItem("Zoom out")) zoom_ = std::max(1, zoom_ - 1);
         ImGui::EndMenu();
@@ -762,6 +768,8 @@ void Editor::drawToolbar() {
     ImGui::TextUnformatted("|");
     ImGui::SameLine();
     if (ImGui::Button("Playtest  F5")) togglePlay();
+    ImGui::SameLine();
+    ImGui::Checkbox("Hitboxes", &showHitboxes_);
     ImGui::SameLine();
     if (ImGui::Button("Build  F6")) buildGame();
     ImGui::SameLine();
@@ -1423,6 +1431,8 @@ void Editor::stampChunkNext() {
 }
 
 void Editor::drawBuildTab() {
+    if (ImGui::Button("Build a stage", ImVec2(-1.f, 0))) buildStage();
+    ImGui::TextWrapped("Builds a playable layout for this stage's game type. You can move or delete any of it.");
     if (ImGui::Button("Check this stage", ImVec2(-1.f, 0))) checkLevel();
     ImGui::Checkbox("Show collision", &showCollision_);
     if (showCollision_)
@@ -1569,13 +1579,18 @@ void Editor::drawLeft() {
                     if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.48f, 0.14f, 1.f));
                     if (ImGui::ImageButton(("tile" + std::to_string(i)).c_str(),
                                            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(tilesetTex_)), ImVec2(36.f, 36.f), uv0,
-                                           uv1, ImVec4(0.08f, 0.08f, 0.12f, 1.f)))
+                                           uv1, ImVec4(0.08f, 0.08f, 0.12f, 1.f))) {
                         selectedTile_ = i;
+                        paintTarget_ = 1;
+                    }
                     if (on) ImGui::PopStyleColor();
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tile %d", i);
                     ImGui::SameLine();
                 }
-                if (ImGui::Selectable(("Tile " + std::to_string(i)).c_str(), on)) selectedTile_ = i;
+                if (ImGui::Selectable(("Tile " + std::to_string(i)).c_str(), on)) {
+                    selectedTile_ = i;
+                    paintTarget_ = 1;
+                }
                 ImGui::PopID();
             }
             ImGui::EndTabItem();
@@ -1597,8 +1612,10 @@ void Editor::drawLeft() {
         }
         if (ImGui::BeginTabItem("Sprites")) {
             for (int i = 0; i < static_cast<int>(project_.sprites.size()); ++i) {
-                if (ImGui::Selectable((project_.sprites[i].name + "##sp" + std::to_string(i)).c_str(), selectedSprite_ == i))
+                if (ImGui::Selectable((project_.sprites[i].name + "##sp" + std::to_string(i)).c_str(), selectedSprite_ == i)) {
                     selectedSprite_ = i;
+                    paintTarget_ = 0;
+                }
             }
             if (ImGui::Button("New sprite")) {
                 Sprite sprite;
@@ -1948,33 +1965,32 @@ void Editor::normalizeSprite(Sprite& sprite) {
     sprite.imgH = imgH;
 }
 
-size_t spritePixel(const Sprite& sprite, int frame, int x, int y) {
-    const int originX = frame * sprite.frameW;
-    return (static_cast<size_t>(y) * sprite.imgW + originX + x) * 4;
+size_t sheetPixel(int imgW, int ox, int oy, int x, int y) {
+    return (static_cast<size_t>(oy + y) * imgW + ox + x) * 4;
 }
 
-void Editor::plotSprite(Sprite& sprite, int frame, int x, int y, bool erase) {
-    if (x < 0 || y < 0 || x >= sprite.frameW || y >= sprite.frameH || frame < 0 || frame >= sprite.frames) return;
-    const size_t i = spritePixel(sprite, frame, x, y);
-    if (i + 3 >= sprite.rgba.size()) return;
+void Editor::plotSheet(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h, int x, int y, bool erase) {
+    if (x < 0 || y < 0 || x >= w || y >= h || imgW <= 0) return;
+    const size_t i = sheetPixel(imgW, ox, oy, x, y);
+    if (i + 3 >= rgba.size()) return;
     if (erase || colorIndex_ < 0) {
-        sprite.rgba[i] = sprite.rgba[i + 1] = sprite.rgba[i + 2] = sprite.rgba[i + 3] = 0;
+        rgba[i] = rgba[i + 1] = rgba[i + 2] = rgba[i + 3] = 0;
     } else {
-        sprite.rgba[i] = paintR_;
-        sprite.rgba[i + 1] = paintG_;
-        sprite.rgba[i + 2] = paintB_;
-        sprite.rgba[i + 3] = 255;
+        rgba[i] = paintR_;
+        rgba[i + 1] = paintG_;
+        rgba[i + 2] = paintB_;
+        rgba[i + 3] = 255;
     }
 }
 
-void Editor::floodSprite(Sprite& sprite, int frame, int x, int y, bool erase) {
-    if (x < 0 || y < 0 || x >= sprite.frameW || y >= sprite.frameH || frame < 0 || frame >= sprite.frames) return;
-    const size_t start = spritePixel(sprite, frame, x, y);
-    if (start + 3 >= sprite.rgba.size()) return;
-    const uint8_t tr = sprite.rgba[start];
-    const uint8_t tg = sprite.rgba[start + 1];
-    const uint8_t tb = sprite.rgba[start + 2];
-    const uint8_t ta = sprite.rgba[start + 3];
+void Editor::floodSheet(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h, int x, int y, bool erase) {
+    if (x < 0 || y < 0 || x >= w || y >= h || imgW <= 0) return;
+    const size_t start = sheetPixel(imgW, ox, oy, x, y);
+    if (start + 3 >= rgba.size()) return;
+    const uint8_t tr = rgba[start];
+    const uint8_t tg = rgba[start + 1];
+    const uint8_t tb = rgba[start + 2];
+    const uint8_t ta = rgba[start + 3];
     const uint8_t nr = erase || colorIndex_ < 0 ? 0 : paintR_;
     const uint8_t ng = erase || colorIndex_ < 0 ? 0 : paintG_;
     const uint8_t nb = erase || colorIndex_ < 0 ? 0 : paintB_;
@@ -1982,16 +1998,16 @@ void Editor::floodSprite(Sprite& sprite, int frame, int x, int y, bool erase) {
     if (tr == nr && tg == ng && tb == nb && ta == na) return;
     std::vector<std::pair<int, int>> stack;
     stack.push_back({x, y});
-    int guard = sprite.frameW * sprite.frameH * 8 + 8;
+    int guard = w * h * 8 + 8;
     while (!stack.empty() && guard-- > 0) {
         const int cx = stack.back().first;
         const int cy = stack.back().second;
         stack.pop_back();
-        if (cx < 0 || cy < 0 || cx >= sprite.frameW || cy >= sprite.frameH) continue;
-        const size_t i = spritePixel(sprite, frame, cx, cy);
-        if (i + 3 >= sprite.rgba.size()) continue;
-        if (sprite.rgba[i] != tr || sprite.rgba[i + 1] != tg || sprite.rgba[i + 2] != tb || sprite.rgba[i + 3] != ta) continue;
-        plotSprite(sprite, frame, cx, cy, erase);
+        if (cx < 0 || cy < 0 || cx >= w || cy >= h) continue;
+        const size_t i = sheetPixel(imgW, ox, oy, cx, cy);
+        if (i + 3 >= rgba.size()) continue;
+        if (rgba[i] != tr || rgba[i + 1] != tg || rgba[i + 2] != tb || rgba[i + 3] != ta) continue;
+        plotSheet(rgba, imgW, ox, oy, w, h, cx, cy, erase);
         stack.push_back({cx + 1, cy});
         stack.push_back({cx - 1, cy});
         stack.push_back({cx, cy + 1});
@@ -1999,14 +2015,15 @@ void Editor::floodSprite(Sprite& sprite, int frame, int x, int y, bool erase) {
     }
 }
 
-void Editor::strokeSprite(Sprite& sprite, int frame, int x0, int y0, int x1, int y1, bool erase) {
+void Editor::strokeSheet(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h, int x0, int y0, int x1, int y1,
+                         bool erase) {
     int dx = std::abs(x1 - x0);
     const int sx = x0 < x1 ? 1 : -1;
     int dy = -std::abs(y1 - y0);
     const int sy = y0 < y1 ? 1 : -1;
     int err = dx + dy;
     for (;;) {
-        plotSprite(sprite, frame, x0, y0, erase);
+        plotSheet(rgba, imgW, ox, oy, w, h, x0, y0, erase);
         if (x0 == x1 && y0 == y1) break;
         const int e2 = 2 * err;
         if (e2 >= dy) {
@@ -2018,6 +2035,35 @@ void Editor::strokeSprite(Sprite& sprite, int frame, int x0, int y0, int x1, int
             y0 += sy;
         }
     }
+}
+
+void Editor::pickSheet(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h, int x, int y) {
+    if (x < 0 || y < 0 || x >= w || y >= h || imgW <= 0) return;
+    const size_t i = sheetPixel(imgW, ox, oy, x, y);
+    if (i + 3 >= rgba.size()) return;
+    if (rgba[i + 3] == 0) {
+        colorIndex_ = -1;
+        return;
+    }
+    colorIndex_ = 16;
+    paintR_ = rgba[i];
+    paintG_ = rgba[i + 1];
+    paintB_ = rgba[i + 2];
+}
+
+void Editor::plotSprite(Sprite& sprite, int frame, int x, int y, bool erase) {
+    if (frame < 0 || frame >= sprite.frames) return;
+    plotSheet(sprite.rgba, sprite.imgW, frame * sprite.frameW, 0, sprite.frameW, sprite.frameH, x, y, erase);
+}
+
+void Editor::floodSprite(Sprite& sprite, int frame, int x, int y, bool erase) {
+    if (frame < 0 || frame >= sprite.frames) return;
+    floodSheet(sprite.rgba, sprite.imgW, frame * sprite.frameW, 0, sprite.frameW, sprite.frameH, x, y, erase);
+}
+
+void Editor::strokeSprite(Sprite& sprite, int frame, int x0, int y0, int x1, int y1, bool erase) {
+    if (frame < 0 || frame >= sprite.frames) return;
+    strokeSheet(sprite.rgba, sprite.imgW, frame * sprite.frameW, 0, sprite.frameW, sprite.frameH, x0, y0, x1, y1, erase);
 }
 
 void Editor::copySpriteFrame(Sprite& sprite, int frame) {
@@ -2033,42 +2079,259 @@ void Editor::copySpriteFrame(Sprite& sprite, int frame) {
 }
 
 void Editor::pickSprite(Sprite& sprite, int frame, int x, int y) {
-    if (x < 0 || y < 0 || x >= sprite.frameW || y >= sprite.frameH || frame < 0 || frame >= sprite.frames) return;
-    const size_t i = spritePixel(sprite, frame, x, y);
-    if (i + 3 >= sprite.rgba.size()) return;
-    if (sprite.rgba[i + 3] == 0) {
-        colorIndex_ = -1;
-        return;
-    }
-    colorIndex_ = 16;
-    paintR_ = sprite.rgba[i];
-    paintG_ = sprite.rgba[i + 1];
-    paintB_ = sprite.rgba[i + 2];
+    if (frame < 0 || frame >= sprite.frames) return;
+    pickSheet(sprite.rgba, sprite.imgW, frame * sprite.frameW, 0, sprite.frameW, sprite.frameH, x, y);
 }
 
-void Editor::drawBottom() {
-    Sprite* sprite = selectedSprite();
-    if (!sprite) {
-        ImGui::TextWrapped("%s", status_.c_str());
-        ImGui::TextUnformatted("Select a sprite to open the pixel painter. Right-click the map to pick a tile.");
+void Editor::buildStage() {
+    Stage* stage = currentStage();
+    if (!stage) return;
+    if (stage->intermission) {
+        status_ = "This stage is a message screen.";
         return;
     }
-    ImGui::Text("Pixel painter — %s", sprite->name.c_str());
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
-    ImGui::InputInt("Frame w", &sprite->frameW);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
-    ImGui::InputInt("Frame h", &sprite->frameH);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
-    ImGui::InputInt("Frames", &sprite->frames);
-    normalizeSprite(*sprite);
-    spriteFrame_ = std::clamp(spriteFrame_, 0, sprite->frames - 1);
-    ImGui::SliderInt("Frame", &spriteFrame_, 0, sprite->frames - 1);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
-    ImGui::InputFloat("FPS", &sprite->fps);
+    const auto pickHero = [&]() -> const ActorDef* {
+        const char* prefer = "runner";
+        if (stage->physics == PhysicsMode::ShooterVert || stage->physics == PhysicsMode::ShooterHorz) prefer = "ship";
+        if (const ActorDef* named = project_.findActor(prefer))
+            if (named->kind == ActorKind::Hero) return named;
+        for (const auto& actor : project_.actors)
+            if (actor.kind == ActorKind::Hero) return &actor;
+        return nullptr;
+    };
+    const ActorDef* hero = pickHero();
+    if (!hero) {
+        status_ = "Add a hero first.";
+        return;
+    }
+    const uint16_t solid = findTile(TileSolid, TileOneWay | TileLadder | TileHazard | TileWater);
+    const uint16_t solidAny = solid != 0 ? solid : findTile(TileSolid, 0);
+    if (solidAny == 0) {
+        status_ = "This tileset has no solid tile.";
+        return;
+    }
+    const uint16_t hazard = findTile(TileHazard, TileSolid);
+    const uint16_t ladderTile = findTile(TileLadder, TileSolid | TileHazard);
+    const ActorDef* coin = project_.findActor("coin");
+    if (!coin) {
+        for (const auto& actor : project_.actors)
+            if (actor.pickup == Pickup::Coin) {
+                coin = &actor;
+                break;
+            }
+    }
+    const ActorDef* door = project_.findActor("door");
+    if (!door) {
+        for (const auto& actor : project_.actors)
+            if (actor.kind == ActorKind::Check && !actor.checkpoint) {
+                door = &actor;
+                break;
+            }
+    }
+    const ActorDef* enemy = project_.findActor("slime");
+    if (!enemy) {
+        for (const auto& actor : project_.actors)
+            if (actor.kind == ActorKind::Enemy) {
+                enemy = &actor;
+                break;
+            }
+    }
+    const Tileset* set = tileset();
+    const float tileWf = set && set->tileW > 0 ? static_cast<float>(set->tileW) : 16.f;
+    const float tileHf = set && set->tileH > 0 ? static_cast<float>(set->tileH) : 16.f;
+    const int savedShape = genShape_;
+    const int savedX = genX_;
+    const int savedY = genY_;
+    const int savedLen = genLen_;
+    const bool savedCoins = genCoins_;
+    const bool savedExit = genExit_;
+    const bool savedDress = genDress_;
+
+    pushUndo();
+    undoSuspend_ = true;
+    undoUsed_ = true;
+    for (int y = 0; y < stage->height; ++y) {
+        for (int x = 0; x < stage->width; ++x) {
+            stage->set(stage->main, x, y, 0);
+            stage->set(stage->back, x, y, 0);
+        }
+    }
+    stage->placements.clear();
+
+    auto dropUnsupported = [&]() {
+        stage->placements.erase(std::remove_if(stage->placements.begin(), stage->placements.end(),
+                                               [&](const Placement& placement) {
+                                                   const int tx = static_cast<int>(placement.x / tileWf);
+                                                   const int ty = static_cast<int>(placement.y / tileHf);
+                                                   if (tx < 0 || ty < 0 || tx >= stage->width || ty + 1 >= stage->height) return false;
+                                                   return !standable(*stage, tx, ty + 1);
+                                               }),
+                                stage->placements.end());
+    };
+
+    const PhysicsMode mode = stage->physics;
+    if (mode == PhysicsMode::Maze) {
+        for (int y = 0; y < stage->height; ++y) {
+            for (int x = 0; x < stage->width; ++x) {
+                const bool border = x == 0 || y == 0 || x == stage->width - 1 || y == stage->height - 1;
+                const bool pillar = (x % 2 == 0) && (y % 2 == 0);
+                if (border || pillar) stage->set(stage->main, x, y, solidAny);
+            }
+        }
+        const int hx = stage->width > 2 ? 1 : 0;
+        const int hy = stage->height > 2 ? 1 : 0;
+        placeActor(*stage, hero, hx, hy);
+        if (coin) {
+            for (int y = 1; y < stage->height - 1; ++y)
+                for (int x = 1; x < stage->width - 1; ++x)
+                    if (stage->get(stage->main, x, y) == 0 && ((x + y) % 4) == 0) placeActor(*stage, coin, x, y);
+        }
+        stage->complete = CompleteMode::CollectAll;
+    } else if (mode == PhysicsMode::TopDown) {
+        for (int y = 0; y < stage->height; ++y) {
+            for (int x = 0; x < stage->width; ++x) {
+                const bool border = x == 0 || y == 0 || x == stage->width - 1 || y == stage->height - 1;
+                const bool block = x > 2 && y > 2 && x < stage->width - 3 && y < stage->height - 3 && (x % 5) == 0 && (y % 4) == 0;
+                if (border || block) stage->set(stage->main, x, y, solidAny);
+            }
+        }
+        placeActor(*stage, hero, stage->width > 2 ? 2 : 0, stage->height > 2 ? 2 : 0);
+        const int dx = std::max(1, stage->width - 2);
+        const int dy = std::max(1, stage->height - 2);
+        stage->set(stage->main, dx, dy, 0);
+        if (door) placeActor(*stage, door, dx, dy);
+        if (coin) {
+            placeActor(*stage, coin, std::min(3, stage->width - 1), stage->height / 2);
+            placeActor(*stage, coin, stage->width / 2, std::min(3, stage->height - 1));
+        }
+        if (enemy) placeActor(*stage, enemy, stage->width / 2, stage->height / 2);
+        stage->complete = CompleteMode::TouchExit;
+    } else if (mode == PhysicsMode::ShooterVert || mode == PhysicsMode::ShooterHorz) {
+        const int columns = std::clamp(stage->width / 8, 2, 6);
+        genShape_ = 4;
+        genCoins_ = false;
+        genExit_ = false;
+        genDress_ = false;
+        for (int i = 1; i <= columns; ++i) {
+            const int x = std::clamp(i * stage->width / (columns + 1), 1, std::max(1, stage->width - 2));
+            const int len = std::clamp(stage->height / 5, 2, 8);
+            const int y = mode == PhysicsMode::ShooterVert ? std::max(1, stage->height / 5) : std::max(1, stage->height / 4);
+            generateStretch(x, y, len);
+            dressStretch(false);
+        }
+        auto openCell = [&](int x, int y) {
+            return x > 0 && y > 0 && x < stage->width - 1 && y < stage->height - 1 && stage->get(stage->main, x, y) == 0;
+        };
+        if (mode == PhysicsMode::ShooterVert) {
+            const int hx = stage->width / 2;
+            const int hy = std::max(1, stage->height - 3);
+            if (openCell(hx, hy)) placeActor(*stage, hero, hx, hy);
+            else placeActor(*stage, hero, 1, hy);
+        } else {
+            const int hy = stage->height / 2;
+            if (openCell(2, hy)) placeActor(*stage, hero, 2, hy);
+            else placeActor(*stage, hero, 1, 1);
+        }
+        if (enemy) {
+            if (openCell(stage->width / 3, 2)) placeActor(*stage, enemy, stage->width / 3, 2);
+            if (openCell((2 * stage->width) / 3, stage->height / 3))
+                placeActor(*stage, enemy, (2 * stage->width) / 3, stage->height / 3);
+        }
+        stage->complete = CompleteMode::ReachEnd;
+    } else {
+        const int floorY = std::max(2, stage->height - 3);
+        for (int x = 0; x < stage->width; ++x) {
+            stage->set(stage->main, x, floorY, solidAny);
+            for (int y = floorY + 1; y < stage->height; ++y) stage->set(stage->main, x, y, solidAny);
+        }
+        genShape_ = 0;
+        genCoins_ = false;
+        genExit_ = false;
+        genDress_ = false;
+        for (int x = 0; x < stage->width; x += 80) {
+            genX_ = x;
+            genY_ = floorY;
+            genLen_ = std::min(80, stage->width - x);
+            dressStretch(false);
+        }
+        if (stage->width >= 16 && floorY >= 4) {
+            genShape_ = 2;
+            genCoins_ = coin != nullptr;
+            genExit_ = false;
+            const int len = std::min(4, floorY);
+            generateStretch(6, floorY, len);
+            dressStretch(false);
+        }
+        if (ladderTile != 0 && stage->width >= 22 && floorY >= 4) {
+            const int pitA = stage->width / 3;
+            const int pitB = (2 * stage->width) / 3;
+            int ladderX = -1;
+            for (int x = stage->width - 6; x >= 8; --x) {
+                const bool inPit = (x >= pitA && x < pitA + 3) || (stage->width >= 24 && x >= pitB && x < pitB + 3);
+                bool ledgeClear = true;
+                for (int i = 1; i <= 4; ++i) {
+                    const int tx = x - i;
+                    if (tx < 1 || (tx >= pitA && tx < pitA + 3) || (stage->width >= 24 && tx >= pitB && tx < pitB + 3)) ledgeClear = false;
+                }
+                if (!inPit && ledgeClear) {
+                    ladderX = x;
+                    break;
+                }
+            }
+            if (ladderX >= 0) {
+                genShape_ = 3;
+                genCoins_ = coin != nullptr;
+                genExit_ = false;
+                generateStretch(ladderX, floorY, std::min(5, floorY));
+                dressStretch(false);
+            }
+        }
+        if (stage->width >= 18) {
+            auto carve = [&](int start) {
+                for (int i = 0; i < 3; ++i) {
+                    const int x = start + i;
+                    if (x < 4 || x > stage->width - 5) continue;
+                    for (int y = floorY; y < stage->height - 1; ++y) stage->set(stage->main, x, y, 0);
+                    stage->set(stage->main, x, stage->height - 1, hazard != 0 ? hazard : 0);
+                }
+            };
+            carve(stage->width / 3);
+            if (stage->width >= 24) carve((2 * stage->width) / 3);
+        }
+        dropUnsupported();
+        for (int x = 1; x < stage->width - 1; ++x) {
+            if (standable(*stage, x, floorY) && placeActor(*stage, hero, x, floorY - 1)) break;
+        }
+        if (door) {
+            for (int x = stage->width - 2; x >= 2; --x) {
+                if (standable(*stage, x, floorY) && placeActor(*stage, door, x, floorY - 1)) break;
+            }
+        }
+        if (enemy) {
+            int placed = 0;
+            for (int x = 4; x < stage->width - 4 && placed < 3; x += std::max(3, stage->width / 5)) {
+                if (standable(*stage, x, floorY) && placeActor(*stage, enemy, x, floorY - 1)) placed++;
+            }
+        }
+        if (coin) {
+            for (int x = 2; x < stage->width - 2; x += 4)
+                if (standable(*stage, x, floorY)) placeActor(*stage, coin, x, floorY - 1);
+        }
+        stage->complete = CompleteMode::TouchExit;
+    }
+
+    undoSuspend_ = false;
+    genShape_ = savedShape;
+    genX_ = savedX;
+    genY_ = savedY;
+    genLen_ = savedLen;
+    genCoins_ = savedCoins;
+    genExit_ = savedExit;
+    genDress_ = savedDress;
+    status_ = "Built a playable stage. Move or delete anything you don't want.";
+}
+
+void Editor::drawSheetPainter(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h) {
     const char* paintTools[] = {"Pencil", "Fill", "Pick", "Line"};
     for (int i = 0; i < 4; ++i) {
         if (i) ImGui::SameLine();
@@ -2080,7 +2343,6 @@ void Editor::drawBottom() {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(120);
     ImGui::SliderInt("Zoom", &paintZoom_, 4, 32);
-    if (spriteFrame_ > 0 && ImGui::Button("Copy previous frame")) copySpriteFrame(*sprite, spriteFrame_);
     for (int i = 0; i < 16; ++i) {
         if (i) ImGui::SameLine();
         ImGui::PushID(i);
@@ -2104,31 +2366,27 @@ void Editor::drawBottom() {
     ImGui::SameLine();
     if (ImGui::Button("Erase")) colorIndex_ = -1;
     const int scale = std::clamp(paintZoom_, 4, 32);
-    const int originX = spriteFrame_ * sprite->frameW;
-    auto indexOf = [&](int x, int y) -> size_t {
-        return (static_cast<size_t>(y) * sprite->imgW + originX + x) * 4;
-    };
+    auto indexOf = [&](int x, int y) -> size_t { return (static_cast<size_t>(oy + y) * imgW + ox + x) * 4; };
     ImGui::BeginChild("pixels", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    for (int y = 0; y < sprite->frameH; ++y) {
-        for (int x = 0; x < sprite->frameW; ++x) {
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
             const size_t i = indexOf(x, y);
             const bool dark = ((x + y) & 1) == 0;
             ImU32 color = dark ? IM_COL32(32, 32, 40, 255) : IM_COL32(52, 52, 62, 255);
-            if (i + 3 < sprite->rgba.size() && sprite->rgba[i + 3] > 0)
-                color = IM_COL32(sprite->rgba[i], sprite->rgba[i + 1], sprite->rgba[i + 2], 255);
+            if (i + 3 < rgba.size() && rgba[i + 3] > 0) color = IM_COL32(rgba[i], rgba[i + 1], rgba[i + 2], 255);
             const ImVec2 a(origin.x + x * scale, origin.y + y * scale);
             const ImVec2 b(a.x + scale, a.y + scale);
             draw->AddRectFilled(a, b, color);
         }
     }
-    ImGui::Dummy(ImVec2(static_cast<float>(sprite->frameW * scale), static_cast<float>(sprite->frameH * scale)));
+    ImGui::Dummy(ImVec2(static_cast<float>(w * scale), static_cast<float>(h * scale)));
     const bool hovered = ImGui::IsItemHovered();
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const int px = static_cast<int>((mouse.x - origin.x) / scale);
     const int py = static_cast<int>((mouse.y - origin.y) / scale);
-    const bool inside = px >= 0 && py >= 0 && px < sprite->frameW && py < sprite->frameH;
+    const bool inside = px >= 0 && py >= 0 && px < w && py < h;
     const bool leftClick = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
     const bool leftDown = hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left);
     const bool rightDown = hovered && ImGui::IsMouseDown(ImGuiMouseButton_Right);
@@ -2138,20 +2396,69 @@ void Editor::drawBottom() {
         paintY0_ = py;
     }
     if (paintLine_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-        if (inside) strokeSprite(*sprite, spriteFrame_, paintX0_, paintY0_, px, py, false);
+        if (inside) strokeSheet(rgba, imgW, ox, oy, w, h, paintX0_, paintY0_, px, py, false);
         paintLine_ = false;
     }
-    if (leftClick && inside && paintTool_ == 1) floodSprite(*sprite, spriteFrame_, px, py, false);
+    if (leftClick && inside && paintTool_ == 1) floodSheet(rgba, imgW, ox, oy, w, h, px, py, false);
     if (rightDown && inside && paintTool_ == 1 && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-        floodSprite(*sprite, spriteFrame_, px, py, true);
-    if (leftClick && inside && paintTool_ == 2) pickSprite(*sprite, spriteFrame_, px, py);
-    if (inside && paintTool_ == 0 && (leftDown || rightDown)) plotSprite(*sprite, spriteFrame_, px, py, rightDown);
+        floodSheet(rgba, imgW, ox, oy, w, h, px, py, true);
+    if (leftClick && inside && paintTool_ == 2) pickSheet(rgba, imgW, ox, oy, w, h, px, py);
+    if (inside && paintTool_ == 0 && (leftDown || rightDown)) plotSheet(rgba, imgW, ox, oy, w, h, px, py, rightDown);
     if (paintLine_ && inside) {
         const ImVec2 a(origin.x + (paintX0_ + 0.5f) * scale, origin.y + (paintY0_ + 0.5f) * scale);
         const ImVec2 b(origin.x + (px + 0.5f) * scale, origin.y + (py + 0.5f) * scale);
         draw->AddLine(a, b, IM_COL32(paintR_, paintG_, paintB_, 255), 2.f);
     }
     ImGui::EndChild();
+}
+
+void Editor::drawBottom() {
+    Sprite* sprite = selectedSprite();
+    Tileset* set = tileset();
+    const bool tileOk = set && selectedTile_ > 0 && selectedTile_ <= static_cast<int>(set->tiles.size()) && set->tileW > 0 &&
+                        set->tileH > 0 && set->imgW > 0;
+    if (paintTarget_ == 1 && !tileOk) paintTarget_ = 0;
+    if (!sprite && !tileOk) {
+        ImGui::TextWrapped("%s", status_.c_str());
+        ImGui::TextUnformatted("Select a sprite or a tile to open the pixel painter.");
+        return;
+    }
+    if (sprite && tileOk) {
+        if (ImGui::Button("Sprite")) paintTarget_ = 0;
+        ImGui::SameLine();
+        if (ImGui::Button("Tile")) paintTarget_ = 1;
+        ImGui::SameLine();
+    } else if (!sprite) {
+        paintTarget_ = 1;
+    }
+    if (paintTarget_ == 1 && tileOk) {
+        const int columns = std::max(1, set->columns);
+        const int index = selectedTile_ - 1;
+        const int col = index % columns;
+        const int row = index / columns;
+        ImGui::Text("Tile painter — tile %d. This picture is shared everywhere the tile is used.", selectedTile_);
+        drawSheetPainter(set->rgba, set->imgW, col * set->tileW, row * set->tileH, set->tileW, set->tileH);
+        return;
+    }
+    if (!sprite) return;
+    ImGui::Text("Pixel painter — %s", sprite->name.c_str());
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    ImGui::InputInt("Frame w", &sprite->frameW);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    ImGui::InputInt("Frame h", &sprite->frameH);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    ImGui::InputInt("Frames", &sprite->frames);
+    normalizeSprite(*sprite);
+    spriteFrame_ = std::clamp(spriteFrame_, 0, sprite->frames - 1);
+    ImGui::SliderInt("Frame", &spriteFrame_, 0, sprite->frames - 1);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    ImGui::InputFloat("FPS", &sprite->fps);
+    if (spriteFrame_ > 0 && ImGui::Button("Copy previous frame")) copySpriteFrame(*sprite, spriteFrame_);
+    drawSheetPainter(sprite->rgba, sprite->imgW, spriteFrame_ * sprite->frameW, 0, sprite->frameW, sprite->frameH);
 }
 
 void Editor::draw(SDL_Renderer* renderer) {
@@ -2165,7 +2472,12 @@ void Editor::draw(SDL_Renderer* renderer) {
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
     drawMenu();
     drawToolbar();
-    const float bottom = selectedSprite() ? std::min(440.f, std::max(240.f, io.DisplaySize.y * 0.42f)) : 64.f;
+    bool tileOk = false;
+    if (const Tileset* set = tileset())
+        tileOk = selectedTile_ > 0 && selectedTile_ <= static_cast<int>(set->tiles.size()) && set->tileW > 0 && set->tileH > 0;
+    if (paintTarget_ == 1 && !tileOk) paintTarget_ = 0;
+    const bool painter = (paintTarget_ == 1 && tileOk) || selectedSprite() != nullptr;
+    const float bottom = painter ? std::min(440.f, std::max(240.f, io.DisplaySize.y * 0.42f)) : 64.f;
     ImGui::TextWrapped("%s", status_.c_str());
     ImGui::BeginChild("left", ImVec2(320, -bottom), true);
     drawLeft();
@@ -2214,7 +2526,8 @@ void Editor::togglePlay() {
         engine_.start(project_, index, {}, true);
         audio_.open();
         const std::string stageName = project_.stages.empty() ? "this stage" : project_.stages[static_cast<size_t>(index)].name;
-        status_ = "Playtest from " + stageName + ". Start pauses. Button 1 restarts. Button 2 returns to the title. F5 leaves the editor.";
+        status_ = "Playtest from " + stageName +
+                  ". Start pauses. Button 1 restarts. Button 2 returns to the title. F3 shows hitboxes. F5 leaves the editor.";
     } else {
         audio_.stopLoops();
     }
@@ -2227,7 +2540,12 @@ void Editor::updatePlay(float dt, const Input& input) {
     if (engine_.takeMusic(music)) audio_.playId(project_, music, 0.45f, true);
 }
 
-void Editor::renderPlay() { engine_.render(); }
+void Editor::toggleHitboxes() { showHitboxes_ = !showHitboxes_; }
+
+void Editor::renderPlay() {
+    engine_.render();
+    if (showHitboxes_) engine_.drawHitboxes();
+}
 
 const std::vector<uint8_t>& Editor::playPixels() const { return engine_.pixels(); }
 int Editor::playWidth() const { return engine_.width(); }
