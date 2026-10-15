@@ -783,26 +783,14 @@ void Editor::drawMenu() {
             if (ImGui::MenuItem("Full demo")) loadDemo();
             ImGui::EndMenu();
         }
-        if (ImGui::MenuItem("Open...", "Ctrl+O")) {
-            const std::string file = pickFile(false, "*.ccproj");
-            std::string err;
-            if (!file.empty() && !openProject(file, err)) status_ = err;
-        }
+        if (ImGui::MenuItem("Open...", "Ctrl+O")) openFilePick(FilePick::OpenProject);
         if (ImGui::MenuItem("Save", "Ctrl+S")) {
-            if (path_.empty()) {
-                const std::string file = pickFile(true, "*.ccproj");
-                if (!file.empty()) saveProject(file);
-            } else saveProject(path_);
+            if (path_.empty()) openFilePick(FilePick::SaveProject);
+            else saveProject(path_);
         }
-        if (ImGui::MenuItem("Save As...")) {
-            const std::string file = pickFile(true, "*.ccproj");
-            if (!file.empty()) saveProject(file);
-        }
+        if (ImGui::MenuItem("Save As...")) openFilePick(FilePick::SaveProject);
         if (ImGui::MenuItem("Build game", "F6")) buildGame();
-        if (ImGui::MenuItem("Load plugin...")) {
-            const std::string file = pickFile(false, "*.ccplugin");
-            if (!file.empty()) loadEditorPlugin(file);
-        }
+        if (ImGui::MenuItem("Load plugin...")) openFilePick(FilePick::LoadPlugin);
         if (ImGui::MenuItem("Quit")) status_ = "Close the window to quit.";
         ImGui::EndMenu();
     }
@@ -1797,10 +1785,7 @@ void Editor::drawLeft() {
                 selectedSprite_ = static_cast<int>(project_.sprites.size()) - 1;
             }
             ImGui::SameLine();
-            if (ImGui::Button("Import PNG")) {
-                const std::string file = pickFile(false, "*.png");
-                if (!file.empty()) importPng(file);
-            }
+            if (ImGui::Button("Import PNG")) openFilePick(FilePick::ImportPng);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Sounds")) {
@@ -1813,10 +1798,7 @@ void Editor::drawLeft() {
                 audio_.play(&project_.sounds[selectedSound_], 0.8f, project_.sounds[selectedSound_].music);
             }
             ImGui::SameLine();
-            if (ImGui::Button("Import WAV")) {
-                const std::string file = pickFile(false, "*.wav");
-                if (!file.empty()) importWav(file);
-            }
+            if (ImGui::Button("Import WAV")) openFilePick(FilePick::ImportWav);
             ImGui::Separator();
             ImGui::TextUnformatted("Sound maker");
             editString("Name", soundName_);
@@ -2772,21 +2754,19 @@ void Editor::draw(SDL_Renderer* renderer) {
     drawBottom();
     ImGui::EndChild();
     ImGui::PopStyleVar();
+    drawFilePick();
     ImGui::End();
     drawBlockEditor();
     drawSelfTest();
 
-        if (!io.WantTextInput) {
+        if (!io.WantTextInput && !filePickOpen_) {
         if (ImGui::IsKeyPressed(ImGuiKey_F6)) buildGame();
         const bool ctrl = io.KeyCtrl;
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z)) undo();
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y)) redo();
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
             if (!path_.empty()) saveProject(path_);
-            else {
-                const std::string file = pickFile(true, "*.ccproj");
-                if (!file.empty()) saveProject(file);
-            }
+            else openFilePick(FilePick::SaveProject);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_ = 0;
         if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_ = 1;
@@ -2972,20 +2952,205 @@ void Editor::buildGame() {
     if (!loadedPlugins().empty()) status_ += ". Plugins were copied beside the game.";
 }
 
-std::string Editor::pickFile(bool save, const char* filter) {
-    const std::string command = std::string("zenity --file-selection ") + (save ? "--save --confirm-overwrite " : "") +
-                                "--file-filter='" + filter + "' 2>/dev/null";
-    FILE* pipe = popen(command.c_str(), "r");
-    if (!pipe) {
-        status_ = "Install zenity for a file dialog, or drop a file onto the window.";
-        return {};
+const char* Editor::filePickExtension() const {
+    switch (filePick_) {
+    case FilePick::LoadPlugin: return ".ccplugin";
+    case FilePick::ImportPng: return ".png";
+    case FilePick::ImportWav: return ".wav";
+    default: return ".ccproj";
     }
-    char buffer[1024];
-    std::string path;
-    while (std::fgets(buffer, sizeof(buffer), pipe)) path += buffer;
-    pclose(pipe);
-    while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
-    return path;
+}
+
+std::vector<Editor::FileEntry> Editor::fileEntries(const std::string& directory, const std::string& extension) const {
+    namespace fs = std::filesystem;
+    std::vector<FileEntry> rows;
+    std::error_code error;
+    fs::directory_iterator it(directory, error);
+    if (error) return rows;
+    const fs::directory_iterator end;
+    for (; it != end; it.increment(error)) {
+        if (error) break;
+        std::error_code status;
+        const bool directoryEntry = it->is_directory(status);
+        if (status) continue;
+        const std::string name = it->path().filename().string();
+        if (name.empty() || name[0] == '.') continue;
+        if (!directoryEntry) {
+            auto lower = [](std::string text) {
+                for (char& ch : text)
+                    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+                return text;
+            };
+            if (lower(it->path().extension().string()) != lower(extension)) continue;
+        }
+        rows.push_back(FileEntry{name, directoryEntry});
+    }
+    std::sort(rows.begin(), rows.end(), [](const FileEntry& a, const FileEntry& b) {
+        if (a.directory != b.directory) return a.directory;
+        std::string left = a.name;
+        std::string right = b.name;
+        for (char& ch : left)
+            if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+        for (char& ch : right)
+            if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+        return left < right;
+    });
+    return rows;
+}
+
+void Editor::openFilePick(FilePick kind) {
+    namespace fs = std::filesystem;
+    filePick_ = kind;
+    filePickOpen_ = true;
+    filePickRequest_ = true;
+    fileReplace_ = false;
+    fileNote_.clear();
+    fileName_.clear();
+    std::error_code error;
+    if (fileDir_.empty() || !fs::is_directory(fileDir_, error)) {
+        if (!path_.empty()) fileDir_ = fs::path(path_).parent_path().string();
+        error.clear();
+        if (fileDir_.empty() || !fs::is_directory(fileDir_, error)) fileDir_ = fs::current_path(error).string();
+        if (fileDir_.empty()) fileDir_ = ".";
+    }
+    if (kind == FilePick::SaveProject) {
+        if (!path_.empty()) fileName_ = fs::path(path_).filename().string();
+        if (fileName_.empty()) fileName_ = "game.ccproj";
+    }
+}
+
+std::string Editor::filePickPath() const {
+    namespace fs = std::filesystem;
+    fs::path file = fs::path(fileDir_) / fileName_;
+    auto lower = [](std::string text) {
+        for (char& ch : text)
+            if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+        return text;
+    };
+    if (lower(file.extension().string()) != lower(filePickExtension())) file += filePickExtension();
+    return file.lexically_normal().string();
+}
+
+void Editor::acceptFilePick(const std::string& path) {
+    const FilePick kind = filePick_;
+    filePickOpen_ = false;
+    filePick_ = FilePick::None;
+    fileReplace_ = false;
+    fileNote_.clear();
+    switch (kind) {
+    case FilePick::OpenProject: {
+        std::string err;
+        if (!openProject(path, err)) status_ = err;
+        break;
+    }
+    case FilePick::SaveProject:
+        saveProject(path);
+        break;
+    case FilePick::LoadPlugin:
+        loadEditorPlugin(path);
+        break;
+    case FilePick::ImportPng:
+        importPng(path);
+        break;
+    case FilePick::ImportWav:
+        importWav(path);
+        break;
+    default:
+        break;
+    }
+}
+
+void Editor::confirmFilePick() {
+    if (fileName_.empty()) {
+        fileNote_ = "Choose a file.";
+        return;
+    }
+    namespace fs = std::filesystem;
+    const std::string path = filePickPath();
+    std::error_code error;
+    if (filePick_ == FilePick::SaveProject) {
+        if (fs::exists(path, error) && !fileReplace_) {
+            fileNote_ = "That file is already there. Save again to replace it.";
+            fileReplace_ = true;
+            return;
+        }
+    } else if (!fs::is_regular_file(path, error)) {
+        fileNote_ = "Choose a file.";
+        return;
+    }
+    acceptFilePick(path);
+}
+
+void Editor::drawFilePick() {
+    fileDialogDrawn_ = false;
+    if (!filePickOpen_ || filePick_ == FilePick::None) return;
+    const char* heading = "Open project";
+    switch (filePick_) {
+    case FilePick::SaveProject: heading = "Save project"; break;
+    case FilePick::LoadPlugin: heading = "Load plugin"; break;
+    case FilePick::ImportPng: heading = "Import picture"; break;
+    case FilePick::ImportWav: heading = "Import sound"; break;
+    default: break;
+    }
+    const std::string popup = std::string(heading) + "###filepick";
+    if (filePickRequest_) {
+        ImGui::OpenPopup(popup.c_str());
+        filePickRequest_ = false;
+    }
+    const ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(520.f, 440.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(popup.c_str(), &filePickOpen_, ImGuiWindowFlags_NoSavedSettings)) return;
+    fileDialogDrawn_ = true;
+    ImGui::TextWrapped("%s", fileDir_.c_str());
+    namespace fs = std::filesystem;
+    if (ImGui::Button("Up")) {
+        const fs::path parent = fs::path(fileDir_).parent_path();
+        if (!parent.empty() && parent != fs::path(fileDir_)) {
+            fileDir_ = parent.string();
+            fileReplace_ = false;
+            fileNote_.clear();
+        }
+    }
+    ImGui::SameLine();
+    ImGui::Text("Showing %s files", filePickExtension());
+    ImGui::BeginChild("filelist", ImVec2(0.f, 280.f), true);
+    const std::vector<FileEntry> rows = fileEntries(fileDir_, filePickExtension());
+    if (rows.empty()) ImGui::TextUnformatted("Nothing in this folder matches.");
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+        const FileEntry& row = rows[static_cast<size_t>(i)];
+        ImGui::PushID(i);
+        const std::string label = row.directory ? row.name + "/" : row.name;
+        const bool selected = !row.directory && row.name == fileName_;
+        if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_AllowDoubleClick)) {
+            if (row.directory) {
+                fileDir_ = (fs::path(fileDir_) / row.name).string();
+                fileReplace_ = false;
+                fileNote_.clear();
+            } else {
+                fileName_ = row.name;
+                fileReplace_ = false;
+                fileNote_.clear();
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) confirmFilePick();
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    if (editString("File", fileName_)) {
+        fileReplace_ = false;
+        fileNote_.clear();
+    }
+    if (!fileNote_.empty()) ImGui::TextWrapped("%s", fileNote_.c_str());
+    const char* action = filePick_ == FilePick::SaveProject ? "Save" : "Open";
+    if (ImGui::Button(action)) confirmFilePick();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        filePickOpen_ = false;
+        ImGui::CloseCurrentPopup();
+    }
+    if (!filePickOpen_) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 void Editor::importPng(const std::string& path) {

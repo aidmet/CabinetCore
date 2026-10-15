@@ -164,6 +164,7 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
         std::ifstream in(remember);
         std::getline(in, rememberText);
     }
+    const std::string savedFileDir = fileDir_;
     const float savedLayoutLeft = layoutLeft_;
     const float savedLayoutInspector = layoutInspector_;
     const float savedLayoutBottom = layoutBottom_;
@@ -240,6 +241,14 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
         chunk_ = savedChunk;
         levelNotes_ = savedNotes;
         levelChecked_ = savedChecked;
+        fileDir_ = savedFileDir;
+        fileName_.clear();
+        fileNote_.clear();
+        filePick_ = FilePick::None;
+        filePickOpen_ = false;
+        filePickRequest_ = false;
+        fileReplace_ = false;
+        fileDialogDrawn_ = false;
         std::error_code error;
         std::filesystem::remove_all(temp, error);
         if (!remember.empty()) {
@@ -1371,6 +1380,35 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
                            uiBottomH_ > 16.f;
             }
             expect("The editor shows the tools, the map, the inspector, and the painter", measured, "");
+
+            const auto pickDir = std::filesystem::temp_directory_path() / "cabinetcore-filepick";
+            std::error_code pickError;
+            std::filesystem::remove_all(pickDir, pickError);
+            std::filesystem::create_directories(pickDir / "more", pickError);
+            {
+                std::ofstream plugin(pickDir / "Demo.ccplugin");
+                plugin << "x";
+                std::ofstream notes(pickDir / "notes.txt");
+                notes << "x";
+            }
+            openFilePick(FilePick::LoadPlugin);
+            fileDir_ = pickDir.string();
+            bool sawPlugin = false;
+            bool sawNotes = false;
+            bool sawFolder = false;
+            for (const auto& entry : fileEntries(fileDir_, ".ccplugin")) {
+                if (entry.name == "Demo.ccplugin" && !entry.directory) sawPlugin = true;
+                if (entry.name == "notes.txt") sawNotes = true;
+                if (entry.name == "more" && entry.directory) sawFolder = true;
+            }
+            expect("Load plugin lists plugin files and folders", sawPlugin && sawFolder && !sawNotes, "");
+            if (drew) {
+                drawEditor();
+                expect("Load plugin draws a file window", fileDialogDrawn_, "");
+            }
+            acceptFilePick((pickDir / "Demo.ccplugin").string());
+            expect("Choosing a plugin file reports the result", status_.find("CabinetCore plugin") != std::string::npos, status_);
+            std::filesystem::remove_all(pickDir, pickError);
         }
     } catch (const std::exception& ex) {
         expect("Self-test ran to the end", false, ex.what());

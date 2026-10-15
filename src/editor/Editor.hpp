@@ -95,7 +95,18 @@ private:
     void buildGame();
     void importPng(const std::string& path);
     void importWav(const std::string& path);
-    std::string pickFile(bool save, const char* filter);
+    enum class FilePick { None, OpenProject, SaveProject, LoadPlugin, ImportPng, ImportWav };
+    struct FileEntry {
+        std::string name;
+        bool directory = false;
+    };
+    void openFilePick(FilePick kind);
+    void drawFilePick();
+    void confirmFilePick();
+    void acceptFilePick(const std::string& path);
+    std::string filePickPath() const;
+    const char* filePickExtension() const;
+    std::vector<FileEntry> fileEntries(const std::string& directory, const std::string& extension) const;
     void addActor(ActorKind kind);
     void addStage(bool duplicate);
     void deleteCurrentStage();
@@ -198,6 +209,14 @@ private:
     bool snapActors_ = false;
     bool playing_ = false;
     std::string armedPlugin_;
+    FilePick filePick_ = FilePick::None;
+    bool filePickOpen_ = false;
+    bool filePickRequest_ = false;
+    bool fileReplace_ = false;
+    bool fileDialogDrawn_ = false;
+    std::string fileDir_;
+    std::string fileName_;
+    std::string fileNote_;
     bool stroking_ = false;
     bool draggingActor_ = false;
     bool blocksOpen_ = false;
