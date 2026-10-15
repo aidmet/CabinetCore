@@ -98,7 +98,12 @@ enum class BlockKind : uint32_t {
     Sound = 41,
     Vanish = 42,
     AddScore = 43,
-    HurtHero = 44
+    HurtHero = 44,
+    GoToStage = 45,
+    SpawnActor = 46,
+    ShowFrame = 47,
+    SendMessage = 48,
+    WhenMessage = 49
 };
 
 enum class BlockTest : uint32_t {

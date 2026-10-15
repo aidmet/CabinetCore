@@ -72,8 +72,19 @@ private:
         bool onGround = false;
         bool blockedX = false;
         bool touchedHero = false;
+        int heldFrame = -1;
         std::vector<float> props;
         std::vector<ScriptRt> scriptRt;
+    };
+
+    struct PendingSpawn {
+        const ActorDef* def = nullptr;
+        float x = 0.f;
+        float y = 0.f;
+        float vx = 0.f;
+        float vy = 0.f;
+        bool shot = false;
+        bool fromPlayer = false;
     };
 
     struct Particle {
@@ -128,8 +139,13 @@ private:
     void grabLadder();
     bool stepOffLadder(const Input& input);
     bool groundAhead(const Ent& ent) const;
-    void runHeroScripts(float dt, uint32_t mask);
-    void runActorScripts(Ent& ent, float dt, uint32_t mask, bool tickWaits);
+    void runHeroScripts(float dt, uint32_t mask, const std::string* message = nullptr);
+    void runActorScripts(Ent& ent, float dt, uint32_t mask, bool tickWaits, const std::string* message = nullptr);
+    void deliverMessage(const std::string& message);
+    void queueSpawn(const ActorDef& def, float x, float y, float vx, float vy, bool shot, bool fromPlayer);
+    void flushSpawns();
+    void requestStage(int index);
+    void applyStageRequest();
     bool runBody(Ent* ent, ScriptRt* rt, const std::vector<Block>& body, int& pc);
     bool blockTest(const Ent* ent, const Block& block) const;
     void applyStatement(Ent* ent, const Block& block);
@@ -198,6 +214,11 @@ private:
     bool heroTouching_ = false;
     int scriptSteps_ = 0;
     int hpMark_ = 0;
+    int messageDepth_ = 0;
+    int playerFrame_ = -1;
+    int stageRequest_ = -1;
+    bool stageRequestSet_ = false;
+    std::vector<PendingSpawn> pendingSpawns_;
     float speedVar_ = 0.f;
     float jumpVar_ = 0.f;
     Input frameInput_;

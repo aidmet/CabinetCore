@@ -3,6 +3,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <string>
@@ -10,7 +11,9 @@
 namespace cc {
 namespace {
 
-bool isHat(BlockKind kind) { return static_cast<uint32_t>(kind) <= static_cast<uint32_t>(BlockKind::WhenHurt); }
+bool isHat(BlockKind kind) {
+    return kind == BlockKind::WhenMessage || static_cast<uint32_t>(kind) <= static_cast<uint32_t>(BlockKind::WhenHurt);
+}
 
 const char* blockTitle(BlockKind kind) {
     switch (kind) {
@@ -20,6 +23,7 @@ const char* blockTitle(BlockKind kind) {
         case BlockKind::WhenButton2: return "when button 2 pressed";
         case BlockKind::WhenTouchHero: return "when touching the hero";
         case BlockKind::WhenHurt: return "when hurt";
+        case BlockKind::WhenMessage: return "when message received";
         case BlockKind::Move: return "move";
         case BlockKind::Turn: return "turn around";
         case BlockKind::Jump: return "jump";
@@ -36,13 +40,18 @@ const char* blockTitle(BlockKind kind) {
         case BlockKind::Vanish: return "vanish";
         case BlockKind::AddScore: return "add score";
         case BlockKind::HurtHero: return "hurt the hero";
+        case BlockKind::GoToStage: return "go to stage";
+        case BlockKind::SpawnActor: return "spawn actor";
+        case BlockKind::ShowFrame: return "show frame";
+        case BlockKind::SendMessage: return "send message";
     }
     return "block";
 }
 
 ImVec4 blockColor(BlockKind kind) {
     const auto id = static_cast<uint32_t>(kind);
-    if (id <= static_cast<uint32_t>(BlockKind::WhenHurt)) return ImVec4(0.90f, 0.50f, 0.12f, 1.f);
+    if (kind == BlockKind::WhenMessage || id <= static_cast<uint32_t>(BlockKind::WhenHurt))
+        return ImVec4(0.90f, 0.50f, 0.12f, 1.f);
     if (id <= static_cast<uint32_t>(BlockKind::Bounce)) return ImVec4(0.20f, 0.45f, 0.90f, 1.f);
     if (id <= static_cast<uint32_t>(BlockKind::Repeat)) return ImVec4(0.86f, 0.66f, 0.14f, 1.f);
     if (id <= static_cast<uint32_t>(BlockKind::ChangeProp)) return ImVec4(0.16f, 0.62f, 0.32f, 1.f);
@@ -61,6 +70,10 @@ Block makeBlock(BlockKind kind) {
         case BlockKind::AddScore: block.num = 50.f; break;
         case BlockKind::HurtHero: block.num = 1.f; break;
         case BlockKind::SetProp: block.name = "speed"; break;
+        case BlockKind::SendMessage:
+        case BlockKind::WhenMessage: block.name = "open"; break;
+        case BlockKind::ShowFrame: block.num = 0.f; break;
+        case BlockKind::GoToStage: block.pick = 0; break;
         default: break;
     }
     return block;
@@ -180,6 +193,13 @@ void Editor::drawBlockEditor() {
         Block block = makeBlock(kind);
         if (block.name.empty() && (kind == BlockKind::SetProp || kind == BlockKind::ChangeProp) && !actor.props.empty())
             block.name = actor.props[0].name;
+        if (kind == BlockKind::SpawnActor && block.name.empty()) {
+            for (const auto& other : project_.actors) {
+                if (other.kind == ActorKind::Hero) continue;
+                block.name = other.id;
+                break;
+            }
+        }
         if (isHat(kind)) {
             Script script;
             script.hat = block;
@@ -287,6 +307,7 @@ void Editor::drawBlockEditor() {
             paletteButton(BlockKind::WhenButton2, addKind);
             paletteButton(BlockKind::WhenTouchHero, addKind);
             paletteButton(BlockKind::WhenHurt, addKind);
+            paletteButton(BlockKind::WhenMessage, addKind);
         }
         if (ImGui::CollapsingHeader("Motion", ImGuiTreeNodeFlags_DefaultOpen)) {
             paletteButton(BlockKind::Move, addKind);
@@ -311,6 +332,12 @@ void Editor::drawBlockEditor() {
             paletteButton(BlockKind::Vanish, addKind);
             paletteButton(BlockKind::AddScore, addKind);
             paletteButton(BlockKind::HurtHero, addKind);
+        }
+        if (ImGui::CollapsingHeader("World", ImGuiTreeNodeFlags_DefaultOpen)) {
+            paletteButton(BlockKind::GoToStage, addKind);
+            paletteButton(BlockKind::SpawnActor, addKind);
+            paletteButton(BlockKind::ShowFrame, addKind);
+            paletteButton(BlockKind::SendMessage, addKind);
         }
     ImGui::EndChild();
     if (!stack) ImGui::SameLine();
@@ -403,6 +430,64 @@ void Editor::drawBlockEditor() {
                         ImGui::SetNextItemWidth(std::min(88.f, ImGui::GetContentRegionAvail().x));
                         ImGui::InputFloat("##n", &block.num, 0, 0, "%.0f");
                         break;
+                    case BlockKind::GoToStage: {
+                        std::string preview = "next stage";
+                        if (block.pick != 0) {
+                            preview = block.name.empty() ? "stage" : block.name;
+                            for (const auto& stage : project_.stages) {
+                                if (stage.id == block.name) preview = stage.name;
+                            }
+                        }
+                        ImGui::SetNextItemWidth(std::max(120.f, ImGui::GetContentRegionAvail().x));
+                        if (ImGui::BeginCombo("##stage", preview.c_str())) {
+                            if (ImGui::Selectable("next stage", block.pick == 0)) {
+                                block.pick = 0;
+                                block.name.clear();
+                            }
+                            for (const auto& stage : project_.stages) {
+                                const std::string label = stage.name + "##" + stage.id;
+                                if (ImGui::Selectable(label.c_str(), block.pick != 0 && block.name == stage.id)) {
+                                    block.pick = 1;
+                                    block.name = stage.id;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        break;
+                    }
+                    case BlockKind::SpawnActor: {
+                        std::string preview = block.name.empty() ? "actor" : block.name;
+                        for (const auto& other : project_.actors) {
+                            if (other.id == block.name) preview = other.name;
+                        }
+                        ImGui::SetNextItemWidth(std::max(120.f, ImGui::GetContentRegionAvail().x));
+                        if (ImGui::BeginCombo("##spawn", preview.c_str())) {
+                            for (const auto& other : project_.actors) {
+                                if (other.kind == ActorKind::Hero) continue;
+                                if (ImGui::Selectable(other.name.c_str(), block.name == other.id)) block.name = other.id;
+                            }
+                            ImGui::EndCombo();
+                        }
+                        break;
+                    }
+                    case BlockKind::ShowFrame: {
+                        bool hold = block.num >= 0.f;
+                        if (ImGui::Checkbox("Hold frame", &hold)) block.num = hold ? 0.f : -1.f;
+                        if (hold) {
+                            int frame = static_cast<int>(std::lround(block.num));
+                            sameLineFit(80.f);
+                            ImGui::SetNextItemWidth(std::min(80.f, ImGui::GetContentRegionAvail().x));
+                            if (ImGui::InputInt("##frame", &frame)) block.num = static_cast<float>(std::clamp(frame, 0, 31));
+                        }
+                        break;
+                    }
+                    case BlockKind::SendMessage: {
+                        char message[32];
+                        std::snprintf(message, sizeof(message), "%s", block.name.c_str());
+                        ImGui::SetNextItemWidth(std::max(80.f, ImGui::GetContentRegionAvail().x));
+                        if (ImGui::InputText("##msg", message, sizeof(message))) block.name = message;
+                        break;
+                    }
                     case BlockKind::Sound:
                         ImGui::SetNextItemWidth(std::max(80.f, ImGui::GetContentRegionAvail().x));
                         if (ImGui::BeginCombo("##snd", block.name.empty() ? "sound" : block.name.c_str())) {
@@ -481,6 +566,12 @@ void Editor::drawBlockEditor() {
                     ImGui::PopID();
                     break;
                 }
+                if (script.hat.kind == BlockKind::WhenMessage) {
+                    char message[32];
+                    std::snprintf(message, sizeof(message), "%s", script.hat.name.c_str());
+                    ImGui::SetNextItemWidth(std::max(80.f, ImGui::GetContentRegionAvail().x));
+                    if (ImGui::InputText("##hatmsg", message, sizeof(message))) script.hat.name = message;
+                }
                 shown = s;
                 drawList(script.body, {}, 0);
                 ImGui::Separator();
@@ -492,6 +583,13 @@ void Editor::drawBlockEditor() {
 
     if (drop.kind >= 0) {
         Block block = makeBlock(static_cast<BlockKind>(drop.kind));
+        if (block.kind == BlockKind::SpawnActor && block.name.empty()) {
+            for (const auto& other : project_.actors) {
+                if (other.kind == ActorKind::Hero) continue;
+                block.name = other.id;
+                break;
+            }
+        }
         const int scriptIndex = drop.script >= 0 ? drop.script : blockScript_;
         if (isHat(block.kind)) {
             addKind(block.kind);

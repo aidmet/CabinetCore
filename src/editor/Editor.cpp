@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -81,9 +82,31 @@ std::string uniqueId(const Project& project, const std::string& base) {
     return base + "_x";
 }
 
+std::string lastProjectFile() {
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return {};
+    return std::string(home) + "/.config/cabinetcore/last-project";
+}
+
+void rememberProject(const std::string& path) {
+    const std::string file = lastProjectFile();
+    if (file.empty()) return;
+    std::error_code error;
+    std::filesystem::create_directories(std::filesystem::path(file).parent_path(), error);
+    std::ofstream out(file);
+    if (out) out << path << '\n';
+}
+
 }  // namespace
 
-Editor::Editor() { loadDemo(); }
+Editor::Editor() {
+    const std::string file = lastProjectFile();
+    std::ifstream in(file);
+    std::string saved;
+    std::getline(in, saved);
+    std::string err;
+    if (saved.empty() || !std::filesystem::exists(saved) || !openProject(saved, err)) loadDemo();
+}
 
 void Editor::loadDemo() {
     project_ = makeDemo();
@@ -105,6 +128,7 @@ bool Editor::openProject(const std::string& path, std::string& err) {
     redo_.clear();
     status_ = "Opened " + path;
     title_ = "CabinetCore — " + project_.settings.title;
+    rememberProject(path);
     return true;
 }
 
@@ -220,6 +244,20 @@ void Editor::flood(int tx, int ty, uint16_t from, uint16_t to) {
         stack.push_back({x, y + 1});
         stack.push_back({x, y - 1});
     }
+}
+
+int Editor::placementAt(float x, float y) const {
+    const Stage* stage = currentStage();
+    if (!stage) return -1;
+    for (int i = static_cast<int>(stage->placements.size()) - 1; i >= 0; --i) {
+        const Placement& placement = stage->placements[static_cast<size_t>(i)];
+        const ActorDef* actor = project_.findActor(placement.actorId);
+        const Sprite* sprite = actor ? project_.findSprite(actor->spriteId) : nullptr;
+        const float w = std::max(12.f, sprite ? static_cast<float>(sprite->frameW) : 16.f);
+        const float h = std::max(12.f, sprite ? static_cast<float>(sprite->frameH) : 16.f);
+        if (x >= placement.x && y >= placement.y && x < placement.x + w && y < placement.y + h) return i;
+    }
+    return -1;
 }
 
 void Editor::applyTool(int tx, int ty, bool click, bool down) {
@@ -339,12 +377,24 @@ void Editor::drawMenu() {
     if (!ImGui::BeginMenuBar()) return;
     if (ImGui::BeginMenu("File")) {
         if (ImGui::BeginMenu("New")) {
-            if (ImGui::MenuItem("Platform")) project_ = makeTemplate(PhysicsMode::Platform, "Platform");
-            if (ImGui::MenuItem("Run and gun")) project_ = makeTemplate(PhysicsMode::RunAndGun, "Run and Gun");
-            if (ImGui::MenuItem("Vertical shooter")) project_ = makeTemplate(PhysicsMode::ShooterVert, "Vertical Shooter");
-            if (ImGui::MenuItem("Horizontal shooter")) project_ = makeTemplate(PhysicsMode::ShooterHorz, "Horizontal Shooter");
-            if (ImGui::MenuItem("Maze")) project_ = makeTemplate(PhysicsMode::Maze, "Maze");
-            if (ImGui::MenuItem("Top-down")) project_ = makeTemplate(PhysicsMode::TopDown, "Top Down");
+            auto beginNew = [&](Project project) {
+                project_ = std::move(project);
+                path_.clear();
+                stageIndex_ = 0;
+                selectedPlacement_ = -1;
+                selectedActor_ = 0;
+                undo_.clear();
+                redo_.clear();
+                blocksOpen_ = false;
+                title_ = "CabinetCore — " + project_.settings.title;
+                status_ = "New project. Ctrl+S saves it, and the editor reopens that file next time.";
+            };
+            if (ImGui::MenuItem("Platform")) beginNew(makeTemplate(PhysicsMode::Platform, "Platform"));
+            if (ImGui::MenuItem("Run and gun")) beginNew(makeTemplate(PhysicsMode::RunAndGun, "Run and Gun"));
+            if (ImGui::MenuItem("Vertical shooter")) beginNew(makeTemplate(PhysicsMode::ShooterVert, "Vertical Shooter"));
+            if (ImGui::MenuItem("Horizontal shooter")) beginNew(makeTemplate(PhysicsMode::ShooterHorz, "Horizontal Shooter"));
+            if (ImGui::MenuItem("Maze")) beginNew(makeTemplate(PhysicsMode::Maze, "Maze"));
+            if (ImGui::MenuItem("Top-down")) beginNew(makeTemplate(PhysicsMode::TopDown, "Top Down"));
             if (ImGui::MenuItem("Full demo")) loadDemo();
             ImGui::EndMenu();
         }
@@ -542,22 +592,43 @@ void Editor::drawCanvas() {
         const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
         const bool release = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
-        if (click) {
-            pushUndo();
-            stroking_ = true;
+        const int hit = click ? placementAt(localX, localY) : -1;
+        if (click && hit >= 0) {
+            tool_ = 0;
+            draggingActor_ = false;
+            selectedPlacement_ = hit;
+            const std::string& id = stage->placements[static_cast<size_t>(hit)].actorId;
+            for (int i = 0; i < static_cast<int>(project_.actors.size()); ++i) {
+                if (project_.actors[static_cast<size_t>(i)].id == id) selectedActor_ = i;
+            }
+            const ActorDef* actor = project_.findActor(id);
+            status_ = std::string("Selected ") + (actor ? actor->name : id);
+        } else {
+            if (click) {
+                pushUndo();
+                stroking_ = true;
+                draggingActor_ = false;
+            }
+            if (click || (down && (tool_ == 1 || tool_ == 2))) applyTool(tx, ty, click, true);
+            if (release && tool_ == 4) applyTool(tx, ty, false, false);
         }
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             selectedTile_ = stage->get(activeLayer(), tx, ty);
             status_ = "Picked tile " + std::to_string(selectedTile_);
         }
-        if (click || (down && (tool_ == 1 || tool_ == 2))) applyTool(tx, ty, click, true);
-        if (release && tool_ == 4) applyTool(tx, ty, false, false);
-        if (tool_ == 0 && selectedPlacement_ >= 0 && down &&
+        if (tool_ == 0 && selectedPlacement_ >= 0 && down && !click &&
             selectedPlacement_ < static_cast<int>(stage->placements.size())) {
+            if (!draggingActor_) {
+                pushUndo();
+                draggingActor_ = true;
+            }
             stage->placements[selectedPlacement_].x = localX - tileW * 0.5f;
             stage->placements[selectedPlacement_].y = localY - tileH * 0.5f;
         }
-        if (release) stroking_ = false;
+        if (release) {
+            stroking_ = false;
+            draggingActor_ = false;
+        }
     }
     if (ImGui::IsWindowFocused() && ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedPlacement_ >= 0 &&
         selectedPlacement_ < static_cast<int>(stage->placements.size())) {
@@ -704,10 +775,10 @@ void Editor::drawBottom() {
     Sprite* sprite = selectedSprite();
     if (!sprite) {
         ImGui::TextWrapped("%s", status_.c_str());
-        ImGui::TextUnformatted("Select a sprite to pixel-edit it. Right-click the map to pick a tile.");
+        ImGui::TextUnformatted("Select a sprite to open the pixel painter. Right-click the map to pick a tile.");
         return;
     }
-    ImGui::Text("Sprite %s", sprite->name.c_str());
+    ImGui::Text("Pixel painter — %s", sprite->name.c_str());
     ImGui::SameLine();
     ImGui::SetNextItemWidth(80);
     ImGui::InputInt("Frame w", &sprite->frameW);
@@ -752,9 +823,17 @@ void Editor::drawBottom() {
     }
     ImGui::SameLine();
     if (ImGui::Button("Erase")) colorIndex_ = -1;
-    const int scale = 12;
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Left click draws. Right click erases.");
+    const ImVec2 room = ImGui::GetContentRegionAvail();
+    int scale = 8;
+    if (sprite->frameW > 0 && sprite->frameH > 0) {
+        const int fitW = static_cast<int>((room.x - 16.f) / sprite->frameW);
+        const int fitH = static_cast<int>((room.y - 8.f) / sprite->frameH);
+        scale = std::clamp(std::min(fitW, fitH), 4, 16);
+    }
     const int originX = spriteFrame_ * sprite->frameW;
-    ImGui::BeginChild("pixels", ImVec2(sprite->frameW * scale + 8.f, sprite->frameH * scale + 8.f), true);
+    ImGui::BeginChild("pixels", ImVec2(0, 0), true);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* draw = ImGui::GetWindowDrawList();
     for (int y = 0; y < sprite->frameH; ++y) {
@@ -768,14 +847,16 @@ void Editor::drawBottom() {
             draw->AddRectFilled(a, b, color);
         }
     }
-    ImGui::Dummy(ImVec2(sprite->frameW * scale, sprite->frameH * scale));
-    if (ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    ImGui::Dummy(ImVec2(static_cast<float>(sprite->frameW * scale), static_cast<float>(sprite->frameH * scale)));
+    const bool drawDown = ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const bool eraseDown = ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Right);
+    if (drawDown || eraseDown) {
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         const int x = static_cast<int>((mouse.x - origin.x) / scale);
         const int y = static_cast<int>((mouse.y - origin.y) / scale);
         if (x >= 0 && y >= 0 && x < sprite->frameW && y < sprite->frameH) {
             const size_t i = (static_cast<size_t>(y) * sprite->imgW + originX + x) * 4;
-            if (colorIndex_ < 0) {
+            if (eraseDown || colorIndex_ < 0) {
                 sprite->rgba[i] = sprite->rgba[i + 1] = sprite->rgba[i + 2] = sprite->rgba[i + 3] = 0;
             } else {
                 sprite->rgba[i] = paintR_;
@@ -786,7 +867,6 @@ void Editor::drawBottom() {
         }
     }
     ImGui::EndChild();
-    ImGui::TextWrapped("%s", status_.c_str());
 }
 
 void Editor::draw(SDL_Renderer* renderer) {
@@ -799,7 +879,7 @@ void Editor::draw(SDL_Renderer* renderer) {
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
     drawMenu();
     drawToolbar();
-    const float bottom = 210.f;
+    const float bottom = selectedSprite() ? std::min(360.f, std::max(180.f, io.DisplaySize.y * 0.38f)) : 64.f;
     ImGui::TextWrapped("%s", status_.c_str());
     ImGui::BeginChild("left", ImVec2(320, -bottom), true);
     drawLeft();
@@ -886,6 +966,7 @@ void Editor::saveProject(const std::string& path) {
         return;
     }
     path_ = file;
+    rememberProject(file);
     status_ = "Saved " + file;
 }
 

@@ -38,6 +38,10 @@ void Engine::start(const Project& project, int stageIndex, const std::string& sc
     frightened_ = 0;
     pending_ = 0;
     phase_ = Phase::Title;
+    stageRequestSet_ = false;
+    pendingSpawns_.clear();
+    playerFrame_ = -1;
+    messageDepth_ = 0;
     ents_.clear();
     parts_.clear();
     sounds_.clear();
@@ -140,6 +144,9 @@ void Engine::loadStage() {
     endHold_ = 0;
     climbing_ = false;
     ladderCool_ = false;
+    playerFrame_ = -1;
+    stageRequestSet_ = false;
+    pendingSpawns_.clear();
     wasJump_ = false;
     fireCd_ = 0;
     vx_ = vy_ = 0;
@@ -332,6 +339,8 @@ void Engine::update(float dt, const Input& input) {
         return;
     }
     updatePlaying(dt, input);
+    if (stageRequestSet_ && phase_ == Phase::Playing) applyStageRequest();
+    else stageRequestSet_ = false;
 }
 
 void Engine::updatePlaying(float dt, const Input& input) {
@@ -469,6 +478,8 @@ void Engine::updatePlaying(float dt, const Input& input) {
             if (ent.touchedHero) runActorScripts(ent, dt, kHatTouch, false);
         }
     }
+
+    flushSpawns();
 
     int coinsLeft = 0;
     int bossesLeft = 0;
@@ -975,6 +986,39 @@ void Engine::applyStatement(Ent* ent, const Block& block) {
             break;
         case BlockKind::AddScore: score_ += static_cast<int>(std::lround(block.num)); break;
         case BlockKind::HurtHero: hurtPlayer(std::max(1, static_cast<int>(std::lround(block.num)))); break;
+        case BlockKind::GoToStage: {
+            if (!proj_) break;
+            if (block.pick == 0 || block.name.empty()) {
+                requestStage(-1);
+                break;
+            }
+            for (int i = 0; i < static_cast<int>(proj_->stages.size()); ++i) {
+                if (proj_->stages[i].id == block.name) {
+                    requestStage(i);
+                    break;
+                }
+            }
+            break;
+        }
+        case BlockKind::SpawnActor: {
+            const ActorDef* def = proj_ ? proj_->findActor(block.name) : nullptr;
+            if (!def || def->kind == ActorKind::Hero) break;
+            const float x = ent ? ent->x : px_;
+            const float y = ent ? ent->y : py_;
+            if (def->kind == ActorKind::Gun) {
+                const float shot = def->behavior.shotSpeed > 1.f ? def->behavior.shotSpeed : 180.f;
+                queueSpawn(*def, x, y, static_cast<float>(*facing) * shot, 0.f, true, ent == nullptr);
+            } else {
+                queueSpawn(*def, x, y, 0.f, 0.f, false, false);
+            }
+            break;
+        }
+        case BlockKind::ShowFrame:
+            if (ent) ent->heldFrame = static_cast<int>(std::lround(block.num));
+            else playerFrame_ = static_cast<int>(std::lround(block.num));
+            break;
+        case BlockKind::SendMessage: deliverMessage(block.name); break;
+        case BlockKind::WhenMessage:
         case BlockKind::WhenSpawned:
         case BlockKind::EveryFrame:
         case BlockKind::WhenButton1:
@@ -1023,7 +1067,7 @@ bool Engine::runBody(Ent* ent, ScriptRt* rt, const std::vector<Block>& body, int
     return true;
 }
 
-void Engine::runHeroScripts(float dt, uint32_t mask) {
+void Engine::runHeroScripts(float dt, uint32_t mask, const std::string* message) {
     if (!hero_ || hero_->scripts.empty()) return;
     if (heroRt_.size() != hero_->scripts.size()) heroRt_.assign(hero_->scripts.size(), {});
     scriptSteps_ = 0;
@@ -1039,7 +1083,11 @@ void Engine::runHeroScripts(float dt, uint32_t mask) {
         const bool button2 = hat == BlockKind::WhenButton2 && (mask & kHatBtn2) && (rt.pc > 0 || frameInput_.shootEdge);
         const bool touch = hat == BlockKind::WhenTouchHero && (mask & kHatTouch);
         const bool hurt = hat == BlockKind::WhenHurt && (mask & kHatHurt);
-        if (!every && !spawn && !button1 && !button2 && !touch && !hurt) continue;
+        if (message) {
+            if (hat != BlockKind::WhenMessage || script.hat.name != *message) continue;
+        } else if (!every && !spawn && !button1 && !button2 && !touch && !hurt) {
+            continue;
+        }
         int pc = every ? 0 : rt.pc;
         const bool finished = runBody(nullptr, &rt, script.body, pc);
         if (every) continue;
@@ -1048,7 +1096,7 @@ void Engine::runHeroScripts(float dt, uint32_t mask) {
     }
 }
 
-void Engine::runActorScripts(Ent& ent, float dt, uint32_t mask, bool tickWaits) {
+void Engine::runActorScripts(Ent& ent, float dt, uint32_t mask, bool tickWaits, const std::string* message) {
     if (!ent.def || ent.def->scripts.empty()) return;
     if (ent.scriptRt.size() != ent.def->scripts.size()) ent.scriptRt.assign(ent.def->scripts.size(), {});
     scriptSteps_ = 0;
@@ -1064,7 +1112,11 @@ void Engine::runActorScripts(Ent& ent, float dt, uint32_t mask, bool tickWaits) 
         const bool button2 = hat == BlockKind::WhenButton2 && (mask & kHatBtn2) && (rt.pc > 0 || frameInput_.shootEdge);
         const bool touch = hat == BlockKind::WhenTouchHero && (mask & kHatTouch);
         const bool hurt = hat == BlockKind::WhenHurt && (mask & kHatHurt);
-        if (!every && !spawn && !button1 && !button2 && !touch && !hurt) continue;
+        if (message) {
+            if (hat != BlockKind::WhenMessage || script.hat.name != *message) continue;
+        } else if (!every && !spawn && !button1 && !button2 && !touch && !hurt) {
+            continue;
+        }
         int pc = every ? 0 : rt.pc;
         const bool finished = runBody(&ent, &rt, script.body, pc);
         if (every) continue;
@@ -1324,6 +1376,85 @@ void Engine::tryPlayerFire(const Input& input) {
     }
     fireCd_ = hero_ && hero_->behavior.fireInterval > 0.f ? hero_->behavior.fireInterval : 0.28f;
     sfx("shoot");
+}
+
+void Engine::deliverMessage(const std::string& message) {
+    if (message.empty() || messageDepth_ > 4) return;
+    ++messageDepth_;
+    runHeroScripts(0.f, 0, &message);
+    const size_t count = ents_.size();
+    for (size_t i = 0; i < count; ++i) {
+        if (!ents_[i].alive || ents_[i].projectile || !ents_[i].def) continue;
+        runActorScripts(ents_[i], 0.f, 0, false, &message);
+    }
+    --messageDepth_;
+}
+
+void Engine::queueSpawn(const ActorDef& def, float x, float y, float vx, float vy, bool shot, bool fromPlayer) {
+    if (ents_.size() + pendingSpawns_.size() >= 240) return;
+    PendingSpawn pending;
+    pending.def = &def;
+    pending.x = x;
+    pending.y = y;
+    pending.vx = vx;
+    pending.vy = vy;
+    pending.shot = shot;
+    pending.fromPlayer = fromPlayer;
+    pendingSpawns_.push_back(pending);
+}
+
+void Engine::flushSpawns() {
+    for (const PendingSpawn& pending : pendingSpawns_) {
+        if (!pending.def || ents_.size() >= 1000) continue;
+        if (pending.shot) {
+            spawnShot(*pending.def, pending.x, pending.y, pending.vx, pending.vy, pending.fromPlayer);
+            continue;
+        }
+        Ent ent;
+        ent.def = pending.def;
+        ent.x = pending.x;
+        ent.y = pending.y;
+        ent.originX = pending.x;
+        ent.originY = pending.y;
+        ent.vx = pending.vx;
+        ent.vy = pending.vy;
+        ent.hp = std::max(1, pending.def->behavior.hp);
+        ent.props.resize(pending.def->props.size());
+        for (size_t p = 0; p < pending.def->props.size(); ++p) ent.props[p] = pending.def->props[p].initial;
+        ent.scriptRt.assign(pending.def->scripts.size(), {});
+        ent.facing = 1;
+        ent.life = pending.def->behavior.lifetime;
+        ent.homeTx = tileIndex(pending.x + 1.f, tileW_);
+        ent.homeTy = tileIndex(pending.y + 1.f, tileH_);
+        ent.awake = true;
+        ent.alive = true;
+        if (pending.def->kind == ActorKind::Boss) bossTotal_++;
+        if (pending.def->kind == ActorKind::Item &&
+            (pending.def->pickup == Pickup::Coin || pending.def->pickup == Pickup::PowerPellet))
+            collectTotal_++;
+        ents_.push_back(std::move(ent));
+    }
+    pendingSpawns_.clear();
+}
+
+void Engine::requestStage(int index) {
+    stageRequest_ = index;
+    stageRequestSet_ = true;
+}
+
+void Engine::applyStageRequest() {
+    const int request = stageRequest_;
+    stageRequestSet_ = false;
+    pendingSpawns_.clear();
+    if (!proj_) return;
+    if (request < 0) {
+        goNext();
+        return;
+    }
+    if (request >= static_cast<int>(proj_->stages.size())) return;
+    pending_ = 0;
+    stageIndex_ = request;
+    loadStage();
 }
 
 void Engine::spawnShot(const ActorDef& gun, float x, float y, float vx, float vy, bool fromPlayer) {
@@ -1707,7 +1838,7 @@ void Engine::drawEnt(const Ent& ent, int ox, int oy) {
     if (ent.def->kind == ActorKind::Item) dy += static_cast<int>(std::sin(time_ * 4.f + ent.x * 0.05f) * 1.5f);
     const int frames = sprite ? std::max(1, sprite->frames) : 1;
     const float fps = sprite ? sprite->fps : 8.f;
-    const int frame = static_cast<int>(ent.anim * fps) % frames;
+    const int frame = ent.heldFrame >= 0 ? ent.heldFrame : static_cast<int>(ent.anim * fps) % frames;
     const bool flip = ent.facing < 0 && (!sprite || sprite->directions < 2);
     if (!sprite || sprite->rgba.empty()) {
         uint8_t r = 255, g = 80, b = 80;
@@ -1732,7 +1863,8 @@ void Engine::drawPlayer(int ox, int oy) {
     if (sprite) {
         const int frames = std::max(1, sprite->frames);
         const bool moving = std::abs(vx_) > 8.f || std::abs(vy_) > 8.f;
-        frame = (moving || !onGround_) ? static_cast<int>(playerAnim_ * sprite->fps) % frames : 0;
+        frame = playerFrame_ >= 0 ? playerFrame_
+                                  : ((moving || !onGround_) ? static_cast<int>(playerAnim_ * sprite->fps) % frames : 0);
     }
     const bool flip = facing_ < 0;
     if (!sprite || sprite->rgba.empty()) canvas_.fillRect(dx, dy, psW_, psH_, 80, 180, 255);

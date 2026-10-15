@@ -107,6 +107,7 @@ int selfTest(const std::string& playerPath) {
     }
     if (!runner || !slime) return fail("Template is missing the hero or slime");
     runner->props.push_back({"speed", 36.f});
+    runner->props.push_back({"heard", 0.f});
     cc::Script scoreScript;
     scoreScript.hat.kind = cc::BlockKind::WhenButton2;
     cc::Block points;
@@ -114,6 +115,15 @@ int selfTest(const std::string& playerPath) {
     points.num = 40.f;
     scoreScript.body.push_back(points);
     runner->scripts.push_back(scoreScript);
+    cc::Script heardScript;
+    heardScript.hat.kind = cc::BlockKind::WhenMessage;
+    heardScript.hat.name = "ping";
+    cc::Block setHeard;
+    setHeard.kind = cc::BlockKind::SetProp;
+    setHeard.name = "heard";
+    setHeard.num = 1.f;
+    heardScript.body.push_back(setHeard);
+    runner->scripts.push_back(heardScript);
     slime->props.push_back({"ticks", 0.f});
     cc::Script tickScript;
     tickScript.hat.kind = cc::BlockKind::EveryFrame;
@@ -123,13 +133,42 @@ int selfTest(const std::string& playerPath) {
     tick.num = 1.f;
     tickScript.body.push_back(tick);
     slime->scripts.push_back(tickScript);
+    cc::Script bornScript;
+    bornScript.hat.kind = cc::BlockKind::WhenSpawned;
+    cc::Block ping;
+    ping.kind = cc::BlockKind::SendMessage;
+    ping.name = "ping";
+    cc::Block spawn;
+    spawn.kind = cc::BlockKind::SpawnActor;
+    spawn.name = "heart";
+    cc::Block frame;
+    frame.kind = cc::BlockKind::ShowFrame;
+    frame.num = 1.f;
+    bornScript.body.push_back(ping);
+    bornScript.body.push_back(spawn);
+    bornScript.body.push_back(frame);
+    slime->scripts.push_back(bornScript);
+    cc::Script later;
+    later.hat.kind = cc::BlockKind::WhenButton1;
+    cc::Block gate;
+    gate.kind = cc::BlockKind::GoToStage;
+    gate.pick = 0;
+    later.body.push_back(gate);
+    slime->scripts.push_back(later);
+    for (auto& actor : blocks.actors) {
+        if (actor.id == "heart") actor.props.push_back({"born", 1.f});
+    }
     if (!blocks.save("/tmp/cabinet_blocks.dat", err)) return fail(err);
     cc::Project loadedBlocks;
     if (!cc::Project::load("/tmp/cabinet_blocks.dat", loadedBlocks, err)) return fail(err);
     const cc::ActorDef* loadedHero = loadedBlocks.findActor("runner");
-    if (!loadedHero || loadedHero->props.size() != 1 || loadedHero->props[0].name != "speed" ||
-        loadedHero->scripts.size() != 1 || loadedHero->scripts[0].body.size() != 1 ||
-        loadedHero->scripts[0].body[0].kind != cc::BlockKind::AddScore) {
+    const cc::ActorDef* loadedSlime = loadedBlocks.findActor("slime");
+    if (!loadedHero || loadedHero->props.size() != 2 || loadedHero->props[0].name != "speed" ||
+        loadedHero->scripts.size() != 2 || loadedHero->scripts[0].body.size() != 1 ||
+        loadedHero->scripts[0].body[0].kind != cc::BlockKind::AddScore ||
+        loadedHero->scripts[1].hat.kind != cc::BlockKind::WhenMessage || loadedHero->scripts[1].hat.name != "ping" ||
+        !loadedSlime || loadedSlime->scripts.size() != 3 || loadedSlime->scripts[2].body.empty() ||
+        loadedSlime->scripts[2].body[0].kind != cc::BlockKind::GoToStage) {
         return fail("Block scripts did not round-trip");
     }
     cc::Engine scripted;
@@ -150,6 +189,8 @@ int selfTest(const std::string& playerPath) {
     shoot.shootEdge = true;
     scripted.update(1.f / 60.f, shoot);
     if (scripted.score() != 40) return fail("Button script did not add score");
+    if (scripted.debugProp("heard") != 1.f) return fail("Message was not delivered");
+    if (scripted.debugProp("born") != 1.f) return fail("Spawn block did not create the actor");
 
     const std::string outDir = "/tmp/cabinetcore_export";
     if (!cc::exportGame(demo, outDir, playerPath, err)) return fail(err);

@@ -59,6 +59,7 @@ private:
     void drawBlockEditor();
     void drawTileFlags();
     void applyTool(int tx, int ty, bool click, bool down);
+    int placementAt(float x, float y) const;
     void flood(int tx, int ty, uint16_t from, uint16_t to);
     void saveProject(const std::string& path);
     void buildGame();
@@ -98,6 +99,7 @@ private:
     bool grid_ = true;
     bool playing_ = false;
     bool stroking_ = false;
+    bool draggingActor_ = false;
     bool blocksOpen_ = false;
     int blockActor_ = -1;
     int blockScript_ = 0;
