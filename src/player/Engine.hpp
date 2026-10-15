@@ -12,7 +12,7 @@ enum class Phase { Title, Playing, Paused, Intermission, GameOver, Victory, Name
 
 class Engine {
 public:
-    void start(const Project& project, int stageIndex = 0, const std::string& scorePath = {});
+    void start(const Project& project, int stageIndex = 0, const std::string& scorePath = {}, bool inGame = false);
     void update(float dt, const Input& input);
     void render();
 

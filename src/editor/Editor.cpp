@@ -12,6 +12,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -455,6 +456,746 @@ void Editor::drawToolbar() {
     ImGui::RadioButton("Foreground", &layer_, 2);
 }
 
+uint16_t Editor::findTile(uint32_t need, uint32_t avoid) {
+    const Tileset* set = tileset();
+    if (!set) return 0;
+    for (int i = 0; i < static_cast<int>(set->tiles.size()); ++i) {
+        const uint32_t flags = set->tiles[static_cast<size_t>(i)].flags;
+        if ((flags & need) == need && (flags & avoid) == 0) return static_cast<uint16_t>(i + 1);
+    }
+    return 0;
+}
+
+bool Editor::standable(const Stage& stage, int x, int y) {
+    const uint16_t id = stage.get(stage.main, x, y);
+    if (id == 0) return false;
+    const Tileset* set = tileset();
+    if (!set || id > static_cast<int>(set->tiles.size())) return false;
+    const uint32_t flags = set->tiles[id - 1].flags;
+    if (flags & (TileLadder | TileHazard | TileWater)) return false;
+    return (flags & (TileSolid | TileOneWay)) != 0;
+}
+
+bool Editor::placeActor(Stage& stage, const ActorDef* actor, int tx, int ty) {
+    if (!actor || tx < 0 || ty < 0 || tx >= stage.width || ty >= stage.height) return false;
+    const Tileset* set = tileset();
+    const float tileW = set ? static_cast<float>(set->tileW) : 16.f;
+    const float tileH = set ? static_cast<float>(set->tileH) : 16.f;
+    const float x = tx * tileW;
+    const float y = ty * tileH;
+    for (const auto& placement : stage.placements) {
+        if (std::abs(placement.x - x) < tileW * 0.5f && std::abs(placement.y - y) < tileH * 0.5f) return false;
+    }
+    Placement placement;
+    placement.uid = project_.freshUid();
+    placement.actorId = actor->id;
+    placement.x = x;
+    placement.y = y;
+    stage.placements.push_back(std::move(placement));
+    return true;
+}
+
+void Editor::generateStretch(int x, int y, int length) {
+    Stage* stage = currentStage();
+    if (!stage) return;
+    length = std::clamp(length, 1, 80);
+    x = std::clamp(x, 0, stage->width - 1);
+    y = std::clamp(y, 0, stage->height - 1);
+    const uint16_t solid = findTile(TileSolid, TileOneWay | TileLadder | TileHazard | TileWater);
+    const uint16_t solidAny = solid != 0 ? solid : findTile(TileSolid, 0);
+    const uint16_t ladder = findTile(TileLadder, TileSolid | TileHazard);
+    const uint16_t oneWay = findTile(TileOneWay, TileHazard | TileLadder);
+    const uint16_t hazard = findTile(TileHazard, TileSolid);
+    if (genShape_ == 3 && ladder == 0) {
+        status_ = "This tileset has no ladder tile.";
+        return;
+    }
+    if (genShape_ != 3 && solidAny == 0) {
+        status_ = "This tileset has no solid tile.";
+        return;
+    }
+    const ActorDef* coin = project_.findActor("coin");
+    if (!coin) {
+        for (const auto& actor : project_.actors)
+            if (actor.pickup == Pickup::Coin) {
+                coin = &actor;
+                break;
+            }
+    }
+    const ActorDef* door = project_.findActor("door");
+    if (!door) {
+        for (const auto& actor : project_.actors)
+            if (actor.kind == ActorKind::Check && !actor.checkpoint) {
+                door = &actor;
+                break;
+            }
+    }
+    pushUndo();
+    genX_ = x;
+    genY_ = y;
+    genLen_ = length;
+    int coins = 0;
+    int exits = 0;
+    auto coinAt = [&](int tx, int ty, bool last) {
+        if (last && genExit_ && door) {
+            if (placeActor(*stage, door, tx, ty)) exits++;
+            return;
+        }
+        if (genCoins_ && coin && placeActor(*stage, coin, tx, ty)) coins++;
+    };
+    if (genShape_ == 0) {
+        for (int i = 0; i < length; ++i) stage->set(stage->main, x + i, y, solidAny);
+        for (int i = 0; i < length; i += 2) {
+            if (i == length - 1) continue;
+            coinAt(x + i, y - 1, false);
+        }
+        if (genExit_ && door && placeActor(*stage, door, x + length - 1, y - 1)) exits++;
+        else coinAt(x + length - 1, y - 1, false);
+    } else if (genShape_ == 1) {
+        const bool pads = length >= 3;
+        for (int i = 0; i < length; ++i) {
+            const bool pad = pads && (i == 0 || i == length - 1);
+            if (pad) stage->set(stage->main, x + i, y, solidAny);
+            else {
+                stage->set(stage->main, x + i, y, 0);
+                if (hazard) stage->set(stage->main, x + i, y + 1, hazard);
+            }
+        }
+        if (pads) {
+            coinAt(x, y - 1, false);
+            if (genExit_ && door && placeActor(*stage, door, x + length - 1, y - 1)) exits++;
+            else coinAt(x + length - 1, y - 1, false);
+        }
+    } else if (genShape_ == 2) {
+        for (int i = 0; i < length; ++i) {
+            const int top = std::max(0, y - i);
+            for (int yy = top; yy <= y; ++yy) stage->set(stage->main, x + i, yy, solidAny);
+            if (i % 2 == 0 || i == length - 1) coinAt(x + i, top - 1, i == length - 1);
+        }
+    } else if (genShape_ == 3) {
+        const int top = std::max(0, y - length + 1);
+        for (int yy = top; yy <= y; ++yy) stage->set(stage->main, x, yy, ladder);
+        const int ledgeY = std::min(y, top + 1);
+        const int dir = x >= 5 ? -1 : 1;
+        const uint16_t ledge = oneWay != 0 ? oneWay : solidAny;
+        if (ledge != 0) {
+            for (int i = 1; i <= 4; ++i) stage->set(stage->main, x + dir * i, ledgeY, ledge);
+            for (int i = 1; i <= 4; ++i) coinAt(x + dir * i, ledgeY - 1, i == 4);
+        }
+    } else {
+        for (int i = 0; i < length; ++i) stage->set(stage->main, x, y + i, solidAny);
+        const int side = x > 0 ? x - 1 : x + 1;
+        for (int i = 0; i < length; i += 2) coinAt(side, y + i, i + 2 >= length);
+    }
+    const char* names[] = {"Floor", "Pit", "Stairs", "Ladder", "Column"};
+    status_ = std::string(names[std::clamp(genShape_, 0, 4)]) + " painted on the collision layer.";
+    if (genCoins_) status_ += " Coins: " + std::to_string(coins) + ".";
+    if (genExit_) status_ += " Exits: " + std::to_string(exits) + ".";
+    if (genDress_) {
+        dressStretch(false);
+        status_ += " Dressed with ground, a top edge, and a backdrop.";
+    }
+}
+
+void Editor::populateFloor() {
+    Stage* stage = currentStage();
+    if (!stage) return;
+    if (popActor_ < 0 || popActor_ >= static_cast<int>(project_.actors.size())) {
+        status_ = "Choose an actor to place.";
+        return;
+    }
+    const ActorDef* actor = &project_.actors[static_cast<size_t>(popActor_)];
+    if (actor->kind == ActorKind::Hero || actor->kind == ActorKind::Gun) {
+        status_ = "Pick an enemy, item, or door.";
+        return;
+    }
+    const int x0 = std::clamp(popX_, 0, stage->width - 1);
+    const int y0 = std::clamp(popY_, 0, stage->height - 1);
+    const int x1 = std::clamp(popX_ + std::max(1, popW_) - 1, x0, stage->width - 1);
+    const int y1 = std::clamp(popY_ + std::max(1, popH_) - 1, y0, stage->height - 1);
+    std::vector<std::pair<int, int>> spots;
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            if (y - 1 < y0) continue;
+            if (standable(*stage, x, y) && !standable(*stage, x, y - 1)) spots.push_back({x, y - 1});
+        }
+    }
+    if (spots.empty()) {
+        status_ = "No floor in that area.";
+        return;
+    }
+    const int count = std::clamp(popCount_, 1, static_cast<int>(spots.size()));
+    pushUndo();
+    int placed = 0;
+    for (int i = 0; i < count; ++i) {
+        const int index = count == 1 ? static_cast<int>(spots.size()) / 2 : i * (static_cast<int>(spots.size()) - 1) / (count - 1);
+        if (placeActor(*stage, actor, spots[static_cast<size_t>(index)].first, spots[static_cast<size_t>(index)].second))
+            placed++;
+    }
+    status_ = "Placed " + std::to_string(placed) + " " + actor->name + " on the floor.";
+}
+
+void Editor::populateTurret() {
+    Stage* stage = currentStage();
+    if (!stage) return;
+    const ActorDef* turret = project_.findActor("turret");
+    if (!turret) {
+        for (const auto& actor : project_.actors) {
+            if (actor.behavior.pattern == AiPattern::Turret || actor.behavior.pattern == AiPattern::Shooter) {
+                turret = &actor;
+                break;
+            }
+        }
+    }
+    if (!turret) {
+        for (const auto& actor : project_.actors)
+            if (actor.kind == ActorKind::Enemy) {
+                turret = &actor;
+                break;
+            }
+    }
+    if (!turret) {
+        status_ = "Add an enemy first.";
+        return;
+    }
+    const int x0 = std::clamp(popX_, 0, stage->width - 1);
+    const int y0 = std::clamp(popY_, 0, stage->height - 1);
+    const int x1 = std::clamp(popX_ + std::max(1, popW_) - 1, x0, stage->width - 1);
+    const int y1 = std::clamp(popY_ + std::max(1, popH_) - 1, y0, stage->height - 1);
+    std::vector<std::pair<int, int>> spots;
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x)
+            if (y - 1 >= y0 && standable(*stage, x, y) && !standable(*stage, x, y - 1)) spots.push_back({x, y - 1});
+    const uint16_t oneWay = findTile(TileOneWay, TileHazard | TileLadder);
+    const uint16_t tile = oneWay != 0 ? oneWay : findTile(TileSolid, TileLadder | TileHazard | TileWater);
+    if (spots.empty() && tile == 0) {
+        status_ = "This tileset has no platform tile.";
+        return;
+    }
+    pushUndo();
+    if (!spots.empty()) {
+        const auto spot = spots[spots.size() / 2];
+        placeActor(*stage, turret, spot.first, spot.second);
+        status_ = "Placed " + turret->name + " on a platform in the area.";
+        return;
+    }
+    const int py = std::clamp(y0 + std::max(1, (y1 - y0) / 2), 1, stage->height - 1);
+    const int px = std::clamp(x0 + std::max(0, (x1 - x0) / 2 - 1), 0, stage->width - 1);
+    for (int i = 0; i < 4; ++i) stage->set(stage->main, px + i, py, tile);
+    placeActor(*stage, turret, px + 1, py - 1);
+    status_ = "Built a platform and placed " + turret->name + ".";
+}
+
+void Editor::populateKeyDoor() {
+    Stage* stage = currentStage();
+    if (!stage) return;
+    const ActorDef* key = project_.findActor("key");
+    if (!key) {
+        for (const auto& actor : project_.actors)
+            if (actor.pickup == Pickup::Key) {
+                key = &actor;
+                break;
+            }
+    }
+    const ActorDef* door = project_.findActor("door");
+    if (!door) {
+        for (const auto& actor : project_.actors)
+            if (actor.kind == ActorKind::Check && !actor.checkpoint) {
+                door = &actor;
+                break;
+            }
+    }
+    if (!key && !door) {
+        status_ = "This project has no key or door.";
+        return;
+    }
+    const int x0 = std::clamp(popX_, 0, stage->width - 1);
+    const int y0 = std::clamp(popY_, 0, stage->height - 1);
+    const int x1 = std::clamp(popX_ + std::max(1, popW_) - 1, x0, stage->width - 1);
+    const int y1 = std::clamp(popY_ + std::max(1, popH_) - 1, y0, stage->height - 1);
+    std::vector<std::pair<int, int>> spots;
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x)
+            if (y - 1 >= 0 && standable(*stage, x, y) && !standable(*stage, x, y - 1)) spots.push_back({x, y - 1});
+    pushUndo();
+    int keyX = x0;
+    int doorX = x1;
+    int standY = std::max(0, y1 - 1);
+    if (!spots.empty()) {
+        keyX = spots.front().first;
+        standY = spots.front().second;
+        doorX = spots.back().first;
+        int doorY = spots.back().second;
+        if (key && door && keyX == doorX && standY == doorY) {
+            if (doorX + 1 < stage->width) doorX++;
+            else if (keyX > 0) keyX--;
+        }
+        if (key) placeActor(*stage, key, keyX, standY);
+        if (door) placeActor(*stage, door, doorX, doorY);
+    } else {
+        if (key && door && keyX == doorX) {
+            if (doorX + 1 < stage->width) doorX++;
+            else if (keyX > 0) keyX--;
+        }
+        const uint16_t solid = findTile(TileSolid, TileOneWay | TileLadder | TileHazard | TileWater);
+        const uint16_t tile = solid != 0 ? solid : findTile(TileSolid, 0);
+        if (tile) {
+            stage->set(stage->main, keyX, standY + 1, tile);
+            stage->set(stage->main, doorX, standY + 1, tile);
+        }
+        if (key) placeActor(*stage, key, keyX, standY);
+        if (door) placeActor(*stage, door, doorX, standY);
+    }
+    status_ = "Placed the key and the door.";
+}
+
+void Editor::finishGeneratorDrag() {
+    Stage* stage = currentStage();
+    genDown_ = false;
+    if (!stage) {
+        genDrag_ = 0;
+        return;
+    }
+    const int x0 = std::clamp(std::min(genX0_, genX1_), 0, stage->width - 1);
+    const int x1 = std::clamp(std::max(genX0_, genX1_), 0, stage->width - 1);
+    const int y0 = std::clamp(std::min(genY0_, genY1_), 0, stage->height - 1);
+    const int y1 = std::clamp(std::max(genY0_, genY1_), 0, stage->height - 1);
+    const int mode = genDrag_;
+    genDrag_ = 0;
+    if (mode == 2) {
+        popX_ = x0;
+        popY_ = y0;
+        popW_ = x1 - x0 + 1;
+        popH_ = y1 - y0 + 1;
+        status_ = "Area set. Choose what to place.";
+        return;
+    }
+    if (mode == 3) {
+        copyChunk(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+        return;
+    }
+    if (mode == 4) {
+        stampChunk(std::clamp(genX0_, 0, stage->width - 1), std::clamp(genY0_, 0, stage->height - 1));
+        return;
+    }
+    if (genShape_ == 4) {
+        genX_ = x0;
+        genY_ = y0;
+        genLen_ = y1 - y0 + 1;
+    } else if (genShape_ == 3) {
+        genX_ = x0;
+        genY_ = y1;
+        genLen_ = y1 - y0 + 1;
+    } else {
+        genX_ = x0;
+        genY_ = y1;
+        genLen_ = x1 - x0 + 1;
+    }
+    generateStretch(genX_, genY_, genLen_);
+}
+
+namespace {
+
+void ensureProp(ActorDef& actor, const std::string& name, float value) {
+    for (const auto& prop : actor.props)
+        if (prop.name == name) return;
+    actor.props.push_back({name, value});
+}
+
+}  // namespace
+
+void Editor::giveDoubleJump(ActorDef& actor) {
+    ensureProp(actor, "jumps", 1.f);
+    ensureProp(actor, "grounded", 1.f);
+    Script every;
+    every.hat.kind = BlockKind::EveryFrame;
+    Block clear;
+    clear.kind = BlockKind::SetProp;
+    clear.name = "grounded";
+    every.body.push_back(clear);
+    Block grounded;
+    grounded.kind = BlockKind::If;
+    grounded.pick = static_cast<int>(BlockTest::OnGround);
+    Block setGround;
+    setGround.kind = BlockKind::SetProp;
+    setGround.name = "grounded";
+    setGround.num = 1.f;
+    Block refill;
+    refill.kind = BlockKind::SetProp;
+    refill.name = "jumps";
+    refill.num = 1.f;
+    grounded.inner.push_back(setGround);
+    grounded.inner.push_back(refill);
+    every.body.push_back(grounded);
+    Script button;
+    button.hat.kind = BlockKind::WhenButton1;
+    Block inAir;
+    inAir.kind = BlockKind::If;
+    inAir.pick = static_cast<int>(BlockTest::Prop);
+    inAir.name = "grounded";
+    inAir.num = 1.f;
+    inAir.num2 = 1.f;
+    Block hasJump;
+    hasJump.kind = BlockKind::If;
+    hasJump.pick = static_cast<int>(BlockTest::Prop);
+    hasJump.name = "jumps";
+    hasJump.num2 = 0.f;
+    Block jump;
+    jump.kind = BlockKind::Jump;
+    Block spend;
+    spend.kind = BlockKind::ChangeProp;
+    spend.name = "jumps";
+    spend.num = -1.f;
+    hasJump.inner.push_back(jump);
+    hasJump.inner.push_back(spend);
+    inAir.inner.push_back(hasJump);
+    button.body.push_back(inAir);
+    actor.scripts.clear();
+    actor.scripts.push_back(std::move(every));
+    actor.scripts.push_back(std::move(button));
+    status_ = "Double jump replaced " + actor.name + "'s scripts. The ground jump is still built in.";
+}
+
+void Editor::givePatrol(ActorDef& actor) {
+    Script every;
+    every.hat.kind = BlockKind::EveryFrame;
+    Block move;
+    move.kind = BlockKind::Move;
+    move.num = actor.behavior.speed > 1.f ? actor.behavior.speed : 60.f;
+    Block wall;
+    wall.kind = BlockKind::If;
+    wall.pick = static_cast<int>(BlockTest::WallAhead);
+    Block turn;
+    turn.kind = BlockKind::Turn;
+    wall.inner.push_back(turn);
+    every.body.push_back(move);
+    every.body.push_back(wall);
+    actor.scripts.clear();
+    actor.scripts.push_back(std::move(every));
+    status_ = actor.name + " now patrols and turns at a wall.";
+}
+
+void Editor::giveOpenMessage(ActorDef& actor) {
+    Script heard;
+    heard.hat.kind = BlockKind::WhenMessage;
+    heard.hat.name = "open";
+    Block gone;
+    gone.kind = BlockKind::Vanish;
+    heard.body.push_back(gone);
+    actor.scripts.clear();
+    actor.scripts.push_back(std::move(heard));
+    status_ = actor.name + " vanishes when it hears open.";
+}
+
+void Editor::giveHurtScore(ActorDef& actor) {
+    Script hurt;
+    hurt.hat.kind = BlockKind::WhenHurt;
+    Block score;
+    score.kind = BlockKind::AddScore;
+    score.num = actor.behavior.score > 0 ? static_cast<float>(actor.behavior.score) : 100.f;
+    Block gone;
+    gone.kind = BlockKind::Vanish;
+    hurt.body.push_back(score);
+    hurt.body.push_back(gone);
+    actor.scripts.clear();
+    actor.scripts.push_back(std::move(hurt));
+    status_ = actor.name + " vanishes and adds score when hurt.";
+}
+
+void Editor::dressStretch(bool recordUndo) {
+    Stage* stage = currentStage();
+    if (!stage) return;
+    const int length = std::clamp(genLen_, 1, 80);
+    const int x = std::clamp(genX_, 0, std::max(0, stage->width - 1));
+    const int y = std::clamp(genY_, 0, std::max(0, stage->height - 1));
+    const uint16_t solid = findTile(TileSolid, TileOneWay | TileLadder | TileHazard | TileWater);
+    const uint16_t solidAny = solid != 0 ? solid : findTile(TileSolid, 0);
+    const uint16_t lip = findTile(TileOneWay, TileHazard | TileLadder);
+    uint16_t backdrop = 0;
+    uint16_t metal = 0;
+    const Tileset* set = tileset();
+    if (set) {
+        for (int i = 0; i < static_cast<int>(set->tiles.size()); ++i) {
+            const uint32_t flags = set->tiles[static_cast<size_t>(i)].flags;
+            const uint16_t id = static_cast<uint16_t>(i + 1);
+            if (flags == 0 && backdrop == 0 && set->tileW > 0 && set->tileH > 0 && set->imgW > 0) {
+                const int columns = std::max(1, set->columns);
+                const int px = (i % columns) * set->tileW + set->tileW / 2;
+                const int py = (i / columns) * set->tileH + set->tileH / 2;
+                const size_t alpha = (static_cast<size_t>(py) * set->imgW + px) * 4 + 3;
+                if (alpha < set->rgba.size() && set->rgba[alpha] > 200) backdrop = id;
+            }
+            if ((flags & TileSolid) && !(flags & (TileOneWay | TileLadder | TileHazard | TileWater | TileDestructible | TileIce)) &&
+                id != solidAny)
+                metal = id;
+        }
+        if (backdrop == 0) {
+            for (int i = 0; i < static_cast<int>(set->tiles.size()); ++i) {
+                if (set->tiles[static_cast<size_t>(i)].flags == 0) {
+                    backdrop = static_cast<uint16_t>(i + 1);
+                    break;
+                }
+            }
+        }
+    }
+    if (recordUndo) pushUndo();
+    auto paintBack = [&](int tx, int top) {
+        if (backdrop == 0 || tx < 0 || tx >= stage->width) return;
+        for (int yy = 0; yy <= top && yy < stage->height; ++yy) {
+            if (stage->get(stage->back, tx, yy) == 0) stage->set(stage->back, tx, yy, backdrop);
+        }
+    };
+    auto ground = [&](int tx, int top, int bottom) {
+        if (tx < 0 || tx >= stage->width || top < 0 || top >= stage->height || solidAny == 0) return;
+        if (lip != 0 && stage->get(stage->main, tx, top) == solidAny) stage->set(stage->main, tx, top, lip);
+        const int stop = std::clamp(bottom, top, stage->height - 1);
+        for (int yy = top + 1; yy <= stop; ++yy) {
+            const uint16_t below = stage->get(stage->main, tx, yy);
+            if (below == 0) stage->set(stage->main, tx, yy, solidAny);
+            else if (below == solidAny || below == lip) continue;
+            else break;
+        }
+        paintBack(tx, top);
+    };
+    const int bedrock = stage->height - 1;
+    if (genShape_ == 1) {
+        const bool pads = length >= 3;
+        for (int i = 0; i < length; ++i) {
+            if (pads && (i == 0 || i == length - 1)) ground(x + i, y, bedrock);
+            else paintBack(x + i, y);
+        }
+    } else if (genShape_ == 2) {
+        for (int i = 0; i < length; ++i) ground(x + i, std::max(0, y - i), y);
+    } else if (genShape_ == 3) {
+        const int top = std::max(0, y - length + 1);
+        paintBack(x, y);
+        const int ledgeY = std::min(y, top + 1);
+        const int dir = x >= 5 ? -1 : 1;
+        for (int i = 1; i <= 4; ++i) {
+            const int tx = x + dir * i;
+            if (lip != 0 && stage->get(stage->main, tx, ledgeY) == solidAny) stage->set(stage->main, tx, ledgeY, lip);
+            paintBack(tx, ledgeY);
+        }
+    } else if (genShape_ == 4) {
+        const uint16_t column = metal != 0 ? metal : solidAny;
+        for (int i = 0; i < length; ++i) {
+            const int ty = y + i;
+            if (column != 0 && stage->get(stage->main, x, ty) == solidAny) stage->set(stage->main, x, ty, column);
+            paintBack(x - 1, ty);
+            paintBack(x, ty);
+            paintBack(x + 1, ty);
+        }
+    } else {
+        for (int i = 0; i < length; ++i) ground(x + i, y, bedrock);
+    }
+    if (recordUndo) status_ = "Dressed the stretch with ground, a top edge, and a backdrop.";
+}
+
+void Editor::copyChunk(int x, int y, int w, int h) {
+    Stage* stage = currentStage();
+    if (!stage) return;
+    ensureLayers(*stage);
+    const int x0 = std::clamp(x, 0, stage->width - 1);
+    const int y0 = std::clamp(y, 0, stage->height - 1);
+    const int x1 = std::clamp(x0 + std::max(1, w) - 1, x0, stage->width - 1);
+    const int y1 = std::clamp(y0 + std::max(1, h) - 1, y0, stage->height - 1);
+    Chunk chunk;
+    chunk.w = x1 - x0 + 1;
+    chunk.h = y1 - y0 + 1;
+    chunk.main.reserve(static_cast<size_t>(chunk.w * chunk.h));
+    chunk.back.reserve(chunk.main.capacity());
+    chunk.front.reserve(chunk.main.capacity());
+    for (int ty = y0; ty <= y1; ++ty) {
+        for (int tx = x0; tx <= x1; ++tx) {
+            chunk.main.push_back(stage->get(stage->main, tx, ty));
+            chunk.back.push_back(stage->get(stage->back, tx, ty));
+            chunk.front.push_back(stage->get(stage->front, tx, ty));
+        }
+    }
+    const Tileset* set = tileset();
+    const float tileW = set && set->tileW > 0 ? static_cast<float>(set->tileW) : 16.f;
+    const float tileH = set && set->tileH > 0 ? static_cast<float>(set->tileH) : 16.f;
+    for (const auto& placement : stage->placements) {
+        const int tx = static_cast<int>(std::floor(placement.x / tileW));
+        const int ty = static_cast<int>(std::floor(placement.y / tileH));
+        if (tx < x0 || ty < y0 || tx > x1 || ty > y1) continue;
+        ClipActor actor;
+        actor.dx = tx - x0;
+        actor.dy = ty - y0;
+        actor.ox = static_cast<int>(std::lround(placement.x - tx * tileW));
+        actor.oy = static_cast<int>(std::lround(placement.y - ty * tileH));
+        actor.actorId = placement.actorId;
+        chunk.actors.push_back(std::move(actor));
+    }
+    chunk_ = std::move(chunk);
+    popX_ = x0;
+    popY_ = y0;
+    popW_ = chunk_.w;
+    popH_ = chunk_.h;
+    status_ = "Copied " + std::to_string(chunk_.w) + "x" + std::to_string(chunk_.h) + " with " +
+              std::to_string(chunk_.actors.size()) + " actors.";
+}
+
+void Editor::stampChunk(int x, int y) {
+    Stage* stage = currentStage();
+    if (!stage || chunk_.w <= 0 || chunk_.h <= 0) {
+        status_ = "Copy an area first.";
+        return;
+    }
+    ensureLayers(*stage);
+    pushUndo();
+    stampX_ = x;
+    stampY_ = y;
+    const Tileset* set = tileset();
+    const float tileW = set && set->tileW > 0 ? static_cast<float>(set->tileW) : 16.f;
+    const float tileH = set && set->tileH > 0 ? static_cast<float>(set->tileH) : 16.f;
+    for (int dy = 0; dy < chunk_.h; ++dy) {
+        for (int dx = 0; dx < chunk_.w; ++dx) {
+            const size_t index = static_cast<size_t>(dy * chunk_.w + dx);
+            stage->set(stage->main, x + dx, y + dy, chunk_.main[index]);
+            stage->set(stage->back, x + dx, y + dy, chunk_.back[index]);
+            stage->set(stage->front, x + dx, y + dy, chunk_.front[index]);
+        }
+    }
+    int placed = 0;
+    for (const auto& actor : chunk_.actors) {
+        const int tx = x + actor.dx;
+        const int ty = y + actor.dy;
+        if (tx < 0 || ty < 0 || tx >= stage->width || ty >= stage->height) continue;
+        const float px = tx * tileW + actor.ox;
+        const float py = ty * tileH + actor.oy;
+        bool blocked = false;
+        for (const auto& placement : stage->placements) {
+            if (placement.actorId == actor.actorId && std::abs(placement.x - px) < 2.f && std::abs(placement.y - py) < 2.f)
+                blocked = true;
+        }
+        if (blocked) continue;
+        Placement placement;
+        placement.uid = project_.freshUid();
+        placement.actorId = actor.actorId;
+        placement.x = px;
+        placement.y = py;
+        stage->placements.push_back(std::move(placement));
+        placed++;
+    }
+    status_ = "Stamped " + std::to_string(chunk_.w) + "x" + std::to_string(chunk_.h) + " and " + std::to_string(placed) +
+              " actors.";
+}
+
+void Editor::stampChunkNext() {
+    if (chunk_.w <= 0 || chunk_.h <= 0) {
+        status_ = "Copy an area first.";
+        return;
+    }
+    if (stageIndex_ + 1 >= static_cast<int>(project_.stages.size())) {
+        status_ = "There is no next stage. Add one, then stamp.";
+        return;
+    }
+    stageIndex_++;
+    selectedPlacement_ = -1;
+    stampChunk(stampX_, stampY_);
+}
+
+void Editor::drawBuildTab() {
+    ImGui::TextWrapped("Stretches and platforms paint the collision layer. You can move or delete anything afterward.");
+    const char* shapes[] = {"Floor", "Pit", "Stairs", "Ladder to a ledge", "Shooter column"};
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::Combo("##shape", &genShape_, shapes, 5);
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("X", &genX_);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("Y", &genY_);
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("Length", &genLen_);
+    ImGui::Checkbox("Coins along it", &genCoins_);
+    ImGui::Checkbox("Exit at the end", &genExit_);
+    ImGui::Checkbox("Dress it", &genDress_);
+    if (ImGui::Button("Apply stretch", ImVec2(-1.f, 0))) generateStretch(genX_, genY_, genLen_);
+    if (ImGui::Button("Dress this stretch", ImVec2(-1.f, 0))) dressStretch(true);
+    const char* stretchDrag = genDrag_ == 1 ? "Cancel stretch drag" : "Drag stretch on the map";
+    if (ImGui::Button(stretchDrag, ImVec2(-1.f, 0))) {
+        genDrag_ = genDrag_ == 1 ? 0 : 1;
+        genDown_ = false;
+        if (genDrag_ == 1) status_ = "Drag across the map, then release.";
+    }
+    ImGui::Separator();
+    ImGui::TextUnformatted("Populate");
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("Area X", &popX_);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("Area Y", &popY_);
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("Width", &popW_);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("Height", &popH_);
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("How many", &popCount_);
+    popCount_ = std::clamp(popCount_, 1, 16);
+    if (popActor_ < 0 || popActor_ >= static_cast<int>(project_.actors.size())) {
+        popActor_ = 0;
+        for (int i = 0; i < static_cast<int>(project_.actors.size()); ++i) {
+            if (project_.actors[static_cast<size_t>(i)].id == "slime") popActor_ = i;
+        }
+    }
+    const char* actorLabel = project_.actors.empty() ? "No actors" : project_.actors[static_cast<size_t>(popActor_)].name.c_str();
+    ImGui::SetNextItemWidth(-1.f);
+    if (ImGui::BeginCombo("##popactor", actorLabel)) {
+        for (int i = 0; i < static_cast<int>(project_.actors.size()); ++i) {
+            const ActorDef& actor = project_.actors[static_cast<size_t>(i)];
+            if (actor.kind == ActorKind::Hero || actor.kind == ActorKind::Gun) continue;
+            if (ImGui::Selectable(actor.name.c_str(), popActor_ == i)) popActor_ = i;
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::Button("On the floor", ImVec2(-1.f, 0))) populateFloor();
+    if (ImGui::Button("Turret on a platform", ImVec2(-1.f, 0))) populateTurret();
+    if (ImGui::Button("Key and door", ImVec2(-1.f, 0))) populateKeyDoor();
+    const char* areaDrag = genDrag_ == 2 ? "Cancel area drag" : "Drag an area on the map";
+    if (ImGui::Button(areaDrag, ImVec2(-1.f, 0))) {
+        genDrag_ = genDrag_ == 2 ? 0 : 2;
+        genDown_ = false;
+        if (genDrag_ == 2) status_ = "Drag a rectangle, then release.";
+    }
+    ImGui::Separator();
+    ImGui::TextUnformatted("Copy");
+    ImGui::TextWrapped("Copies tiles from all three layers and the actors inside the area.");
+    if (ImGui::Button("Copy the area", ImVec2(-1.f, 0))) copyChunk(popX_, popY_, popW_, popH_);
+    const char* copyDrag = genDrag_ == 3 ? "Cancel copy drag" : "Drag an area to copy";
+    if (ImGui::Button(copyDrag, ImVec2(-1.f, 0))) {
+        genDrag_ = genDrag_ == 3 ? 0 : 3;
+        genDown_ = false;
+        if (genDrag_ == 3) status_ = "Drag the chunk, then release.";
+    }
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("Stamp X", &stampX_);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputInt("Stamp Y", &stampY_);
+    if (ImGui::Button("Stamp here", ImVec2(-1.f, 0))) stampChunk(stampX_, stampY_);
+    if (ImGui::Button("Stamp into the next stage", ImVec2(-1.f, 0))) stampChunkNext();
+    const char* stampDrag = genDrag_ == 4 ? "Cancel stamp" : "Click the map to stamp";
+    if (ImGui::Button(stampDrag, ImVec2(-1.f, 0))) {
+        genDrag_ = genDrag_ == 4 ? 0 : 4;
+        genDown_ = false;
+        if (genDrag_ == 4) status_ = "Click where the chunk should land.";
+    }
+    ImGui::Separator();
+    ImGui::TextUnformatted("Ready-made scripts");
+    if (selectedActor_ < 0 || selectedActor_ >= static_cast<int>(project_.actors.size())) {
+        ImGui::TextWrapped("Select an actor first.");
+    } else {
+        ActorDef& actor = project_.actors[static_cast<size_t>(selectedActor_)];
+        ImGui::TextWrapped("These replace the scripts on %s.", actor.name.c_str());
+        if (ImGui::Button("Double jump", ImVec2(-1.f, 0))) giveDoubleJump(actor);
+        if (ImGui::Button("Patrol and turn at a wall", ImVec2(-1.f, 0))) givePatrol(actor);
+        if (ImGui::Button("Open when it hears open", ImVec2(-1.f, 0))) giveOpenMessage(actor);
+        if (ImGui::Button("Vanish and score when hurt", ImVec2(-1.f, 0))) giveHurtScore(actor);
+    }
+}
+
 void Editor::drawLeft() {
     if (ImGui::BeginTabBar("left", ImGuiTabBarFlags_FittingPolicyScroll)) {
         if (ImGui::BeginTabItem("Stages")) {
@@ -547,6 +1288,10 @@ void Editor::drawLeft() {
             }
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Build")) {
+            drawBuildTab();
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("Game")) {
             editString("Title", project_.settings.title);
             editString("Author", project_.settings.author);
@@ -589,6 +1334,10 @@ void Editor::drawCanvas() {
     if (hovered) {
         status_ = "Tile " + std::to_string(tx) + "," + std::to_string(ty) + "   " + kTools[tool_] +
                   "   layer " + std::string(layer_ == 0 ? "backdrop" : layer_ == 2 ? "foreground" : "collision");
+        if (genDrag_ == 1) status_ = "Drag the stretch, then release.";
+        if (genDrag_ == 2) status_ = "Drag the area, then release.";
+        if (genDrag_ == 3) status_ = "Drag the chunk to copy, then release.";
+        if (genDrag_ == 4) status_ = "Click where the chunk should land.";
         const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
         const bool release = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
@@ -603,6 +1352,25 @@ void Editor::drawCanvas() {
             }
             const ActorDef* actor = project_.findActor(id);
             status_ = std::string("Selected ") + (actor ? actor->name : id);
+        } else if (genDrag_ != 0) {
+            if (click) {
+                genDown_ = true;
+                genX0_ = genX1_ = tx;
+                genY0_ = genY1_ = ty;
+                draggingActor_ = false;
+            } else if (down && genDown_) {
+                genX1_ = tx;
+                genY1_ = ty;
+            }
+            if (genDown_) {
+                const int x0 = std::min(genX0_, genX1_);
+                const int y0 = std::min(genY0_, genY1_);
+                const int x1 = std::max(genX0_, genX1_);
+                const int y1 = std::max(genY0_, genY1_);
+                const ImVec2 a(origin.x + x0 * tileW * zoom_, origin.y + y0 * tileH * zoom_);
+                const ImVec2 b(origin.x + (x1 + 1) * tileW * zoom_, origin.y + (y1 + 1) * tileH * zoom_);
+                ImGui::GetWindowDrawList()->AddRect(a, b, IM_COL32(255, 210, 60, 255), 0.f, 0, 2.f);
+            }
         } else {
             if (click) {
                 pushUndo();
@@ -630,6 +1398,7 @@ void Editor::drawCanvas() {
             draggingActor_ = false;
         }
     }
+    if (genDown_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) finishGeneratorDrag();
     if (ImGui::IsWindowFocused() && ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedPlacement_ >= 0 &&
         selectedPlacement_ < static_cast<int>(stage->placements.size())) {
         pushUndo();
@@ -922,9 +1691,11 @@ void Editor::draw(SDL_Renderer* renderer) {
 void Editor::togglePlay() {
     playing_ = !playing_;
     if (playing_) {
-        engine_.start(project_);
+        const int index = project_.stages.empty() ? 0 : std::clamp(stageIndex_, 0, static_cast<int>(project_.stages.size()) - 1);
+        engine_.start(project_, index, {}, true);
         audio_.open();
-        status_ = "Playtest. Start pauses. Button 1 restarts. Button 2 returns to the title. F5 leaves the editor.";
+        const std::string stageName = project_.stages.empty() ? "this stage" : project_.stages[static_cast<size_t>(index)].name;
+        status_ = "Playtest from " + stageName + ". Start pauses. Button 1 restarts. Button 2 returns to the title. F5 leaves the editor.";
     } else {
         audio_.stopLoops();
     }

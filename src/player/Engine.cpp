@@ -24,7 +24,7 @@ int tileIndex(float v, int tile) { return static_cast<int>(std::floor(v / static
 
 }  // namespace
 
-void Engine::start(const Project& project, int stageIndex, const std::string& scorePath) {
+void Engine::start(const Project& project, int stageIndex, const std::string& scorePath, bool inGame) {
     proj_ = &project;
     scorePath_ = scorePath;
     canvas_.resize(std::max(160, project.settings.viewW), std::max(120, project.settings.viewH));
@@ -50,7 +50,7 @@ void Engine::start(const Project& project, int stageIndex, const std::string& sc
     musicId_.clear();
     musicDirty_ = false;
     loadScores();
-    if (!project.stages.empty() && stageIndex > 0) {
+    if (!project.stages.empty() && (inGame || stageIndex > 0)) {
         phase_ = Phase::Playing;
         loadStage();
     }
