@@ -20,14 +20,17 @@ public:
     bool openProject(const std::string& path, std::string& err);
     void dropFile(const std::string& path);
     void draw(SDL_Renderer* renderer);
+    enum class SelfTestKind { Editor = 0, Gameplay = 1, Ui = 2 };
+
     struct SelfCheck {
         std::string name;
         bool pass = false;
         std::string detail;
+        SelfTestKind kind = SelfTestKind::Editor;
     };
 
     bool playing() const { return playing_; }
-    int runSelfTest(SDL_Renderer* renderer = nullptr);
+    int runSelfTest(SDL_Renderer* renderer = nullptr, int which = -1);
     const std::vector<SelfCheck>& selfChecks() const { return selfChecks_; }
     void togglePlay();
     void toggleHitboxes();
@@ -112,6 +115,8 @@ private:
     void drawSheetPainter(std::vector<uint8_t>& rgba, int imgW, int ox, int oy, int w, int h);
     void buildStage();
     void drawSelfTest();
+    void zoomIn();
+    void zoomOut();
     Tileset* tileset();
     Sprite* selectedSprite();
 
@@ -136,6 +141,13 @@ private:
     int paintTarget_ = 0;
     std::vector<SelfCheck> selfChecks_;
     bool selfTestOpen_ = false;
+    int selfTestWhich_ = -1;
+    float uiLeftW_ = 0;
+    float uiLeftH_ = 0;
+    float uiCanvasW_ = 0;
+    float uiCanvasH_ = 0;
+    float uiInspectorW_ = 0;
+    float uiBottomH_ = 0;
     SDL_Renderer* drawRenderer_ = nullptr;
     SDL_Texture* mapTex_ = nullptr;
     SDL_Texture* tilesetTex_ = nullptr;

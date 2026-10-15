@@ -149,16 +149,22 @@ int main(int argc, char** argv) {
             SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE) : nullptr;
             cc::Editor editor;
             const int failed = editor.runSelfTest(renderer);
-            int passed = 0;
+            const char* names[] = {"editor", "gameplay", "ui"};
+            int passed[3] = {};
+            int failedCount[3] = {};
             for (const auto& check : editor.selfChecks()) {
+                int kind = static_cast<int>(check.kind);
+                if (kind < 0 || kind > 2) kind = 0;
                 if (check.pass) {
-                    ++passed;
+                    passed[kind]++;
                     continue;
                 }
-                std::cerr << "FAIL " << check.name << '\n';
+                failedCount[kind]++;
+                std::cerr << "FAIL " << names[kind] << " " << check.name << '\n';
                 if (!check.detail.empty()) std::cerr << "  " << check.detail << '\n';
             }
-            std::cout << "editor selftest " << passed << " passed, " << failed << " failed\n";
+            for (int kind = 0; kind < 3; ++kind)
+                std::cout << names[kind] << " selftest " << passed[kind] << " passed, " << failedCount[kind] << " failed\n";
             if (renderer) SDL_DestroyRenderer(renderer);
             if (window) SDL_DestroyWindow(window);
             SDL_Quit();

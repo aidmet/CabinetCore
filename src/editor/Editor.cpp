@@ -752,16 +752,23 @@ void Editor::drawMenu() {
         ImGui::MenuItem("Grid", nullptr, &grid_);
         ImGui::MenuItem("Collision colors", nullptr, &showCollision_);
         ImGui::MenuItem("Hitboxes in playtest", "F3", &showHitboxes_);
-        if (ImGui::MenuItem("Zoom in")) zoom_ = std::min(6, zoom_ + 1);
-        if (ImGui::MenuItem("Zoom out")) zoom_ = std::max(1, zoom_ - 1);
+        if (ImGui::MenuItem("Zoom in")) zoomIn();
+        if (ImGui::MenuItem("Zoom out")) zoomOut();
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Test")) {
-        if (ImGui::MenuItem("Run self-test")) runSelfTest(nullptr);
+        if (ImGui::MenuItem("Editor")) runSelfTest(nullptr, 0);
+        if (ImGui::MenuItem("Gameplay")) runSelfTest(nullptr, 1);
+        if (ImGui::MenuItem("UI")) runSelfTest(nullptr, 2);
+        if (ImGui::MenuItem("Run all")) runSelfTest(nullptr, -1);
         ImGui::EndMenu();
     }
     ImGui::EndMenuBar();
 }
+
+void Editor::zoomIn() { zoom_ = std::min(6, zoom_ + 1); }
+
+void Editor::zoomOut() { zoom_ = std::max(1, zoom_ - 1); }
 
 void Editor::drawToolbar() {
     for (int i = 0; i < 6; ++i) {
@@ -2505,17 +2512,23 @@ void Editor::draw(SDL_Renderer* renderer) {
     const float bottom = painter ? std::min(440.f, std::max(240.f, io.DisplaySize.y * 0.42f)) : 64.f;
     ImGui::TextWrapped("%s", status_.c_str());
     ImGui::BeginChild("left", ImVec2(320, -bottom), true);
+    uiLeftW_ = ImGui::GetWindowWidth();
+    uiLeftH_ = ImGui::GetWindowHeight();
     drawLeft();
     ImGui::EndChild();
     ImGui::SameLine();
     ImGui::BeginChild("canvas", ImVec2(-340, -bottom), true, ImGuiWindowFlags_HorizontalScrollbar);
+    uiCanvasW_ = ImGui::GetWindowWidth();
+    uiCanvasH_ = ImGui::GetWindowHeight();
     drawCanvas();
     ImGui::EndChild();
     ImGui::SameLine();
     ImGui::BeginChild("inspector", ImVec2(0, -bottom), true);
+    uiInspectorW_ = ImGui::GetWindowWidth();
     drawInspector();
     ImGui::EndChild();
     ImGui::BeginChild("bottom", ImVec2(0, 0), true);
+    uiBottomH_ = ImGui::GetWindowHeight();
     drawBottom();
     ImGui::EndChild();
     ImGui::End();

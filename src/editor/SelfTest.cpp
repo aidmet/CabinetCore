@@ -7,6 +7,8 @@
 
 #include <SDL.h>
 
+#include "backends/imgui_impl_sdl2.h"
+#include "backends/imgui_impl_sdlrenderer2.h"
 #include "imgui.h"
 
 #include <cstdint>
@@ -99,8 +101,9 @@ uint8_t pixelAt(const Sprite& sprite, int frame, int x, int y, int channel) {
 
 }  // namespace
 
-int Editor::runSelfTest(SDL_Renderer* renderer) {
+int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
     if (renderer) drawRenderer_ = renderer;
+    selfTestWhich_ = which;
 
     const Project savedProject = project_;
     const std::string savedPath = path_;
@@ -230,8 +233,9 @@ int Editor::runSelfTest(SDL_Renderer* renderer) {
 
     selfChecks_.clear();
     int failed = 0;
+    SelfTestKind checkKind = SelfTestKind::Editor;
     auto expect = [&](const std::string& name, bool pass, const std::string& detail) {
-        selfChecks_.push_back({name, pass, detail});
+        selfChecks_.push_back({name, pass, detail, checkKind});
         if (!pass) ++failed;
     };
     auto fresh = [&]() {
@@ -272,6 +276,8 @@ int Editor::runSelfTest(SDL_Renderer* renderer) {
     try {
         std::filesystem::remove_all(temp);
         std::filesystem::create_directories(temp);
+        if (which < 0 || which == 0) {
+        checkKind = SelfTestKind::Editor;
 
         const PhysicsMode modes[] = {PhysicsMode::Platform, PhysicsMode::RunAndGun, PhysicsMode::ShooterVert,
                                      PhysicsMode::ShooterHorz, PhysicsMode::Maze, PhysicsMode::TopDown};
@@ -1064,6 +1070,196 @@ int Editor::runSelfTest(SDL_Renderer* renderer) {
 
         expect("Save, open, import, and drop were tested without a file dialog", true,
                "The test writes its own files, so it does not wait for you to pick one.");
+        }
+
+        if (which < 0 || which == 1) {
+            checkKind = SelfTestKind::Gameplay;
+            fresh();
+            if (playing_) togglePlay();
+            engine_.start(project_, 0, {}, true);
+            engine_.update(1.f / 60.f, {});
+            const float groundY = engine_.playerY();
+            const float groundX = engine_.playerX();
+            Input jump;
+            jump.jumpEdge = true;
+            jump.jump = true;
+            engine_.update(1.f / 60.f, jump);
+            for (int frame = 0; frame < 8; ++frame) {
+                jump.jumpEdge = false;
+                engine_.update(1.f / 60.f, jump);
+            }
+            expect("A jump leaves the ground", engine_.playerY() < groundY - 4.f, "");
+            for (int frame = 0; frame < 20; ++frame) {
+                Input run;
+                run.axisX = 1.f;
+                engine_.update(1.f / 60.f, run);
+            }
+            expect("Holding right moves the hero", engine_.playerX() > groundX + 8.f, "");
+            Input shot;
+            shot.shootEdge = true;
+            shot.shoot = true;
+            engine_.update(1.f / 60.f, shot);
+            expect("Button 2 fires the normal shot", engine_.debugBulletX() >= 0.f, "");
+            Input pause;
+            pause.pauseEdge = true;
+            engine_.update(1.f / 60.f, pause);
+            expect("Pausing stops the game", engine_.phase() == Phase::Paused, "");
+            engine_.update(1.f / 60.f, pause);
+            expect("Pausing again resumes the game", engine_.phase() == Phase::Playing, "");
+
+            fresh();
+            Stage& rideStage = *currentStage();
+            for (int x = 0; x < 6; ++x) {
+                rideStage.set(rideStage.main, x, 13, 0);
+                rideStage.set(rideStage.main, x, 14, 0);
+            }
+            for (auto& placement : rideStage.placements)
+                if (placement.actorId == "runner") placement.y = 192.f;
+            Placement liftSpot;
+            liftSpot.uid = project_.freshUid();
+            liftSpot.actorId = "lift";
+            liftSpot.x = 16.f;
+            liftSpot.y = 208.f;
+            rideStage.placements.push_back(liftSpot);
+            engine_.start(project_, 0, {}, true);
+            const float rideX = engine_.playerX();
+            const float rideY = engine_.playerY();
+            for (int frame = 0; frame < 40; ++frame) engine_.update(1.f / 60.f, {});
+            expect("A moving platform carries the hero", engine_.playerX() > rideX + 8.f && engine_.playerY() < rideY + 6.f, "");
+
+            fresh();
+            for (auto& actor : project_.actors)
+                if (actor.id == "slime") {
+                    actor.behavior.stomp = true;
+                    actor.behavior.hp = 1;
+                    actor.behavior.pattern = AiPattern::Idle;
+                    actor.behavior.speed = 0.f;
+                    actor.behavior.gravity = false;
+                    actor.hitW = 40.f;
+                }
+            for (auto& placement : currentStage()->placements) {
+                if (placement.actorId == "runner") placement.y = 32.f;
+                if (placement.actorId == "slime") {
+                    placement.x = 20.f;
+                    placement.y = 120.f;
+                }
+            }
+            engine_.start(project_, 0, {}, true);
+            const int hp = engine_.hp();
+            for (int frame = 0; frame < 50; ++frame) engine_.update(1.f / 60.f, {});
+            expect("Landing on a stompable enemy defeats it", engine_.hp() == hp && engine_.score() >= 100, "");
+
+            fresh();
+            if (Tileset* set = tileset()) {
+                TileDef cracked = set->tiles[0];
+                cracked.flags = TileSolid | TileCrumble;
+                set->tiles.push_back(cracked);
+                currentStage()->set(currentStage()->main, 2, 13, static_cast<uint16_t>(set->tiles.size()));
+                engine_.start(project_, 0, {}, true);
+                const float standY = engine_.playerY();
+                for (int frame = 0; frame < 50; ++frame) engine_.update(1.f / 60.f, {});
+                expect("A crumble tile falls after you stand on it", engine_.debugTile(2, 13) == 0 && engine_.playerY() > standY + 4.f,
+                       "");
+            } else {
+                expect("A crumble tile falls after you stand on it", false, "No tileset.");
+            }
+
+            fresh();
+            ActorDef pack;
+            pack.id = "test_bomb";
+            pack.name = "Screen bomb";
+            pack.kind = ActorKind::Item;
+            pack.pickup = Pickup::Special;
+            pack.pickupAmount = 1;
+            pack.hitW = 20.f;
+            pack.hitH = 20.f;
+            pack.behavior.touchDamage = 0;
+            pack.behavior.gravity = false;
+            project_.actors.push_back(pack);
+            Placement bombSpot;
+            bombSpot.uid = project_.freshUid();
+            bombSpot.actorId = "test_bomb";
+            bombSpot.x = 32.f;
+            bombSpot.y = 192.f;
+            currentStage()->placements.push_back(bombSpot);
+            engine_.start(project_, 0, {}, true);
+            engine_.update(1.f / 60.f, {});
+            expect("A special pickup adds ammo", engine_.specialAmmo() == 1, "");
+            bool normalShot = false;
+            for (int frame = 0; frame < 36; ++frame) {
+                Input hold;
+                hold.shoot = true;
+                hold.shootEdge = frame == 0;
+                engine_.update(1.f / 60.f, hold);
+                if (frame == 0 && engine_.debugBulletX() >= 0.f) normalShot = true;
+            }
+            expect("Button 2 still fires the normal shot when a special is held", normalShot, "");
+            engine_.update(1.f / 60.f, {});
+            expect("Holding button 2 spends one special", engine_.specialAmmo() == 0 && engine_.score() >= 100, "");
+
+            fresh();
+            for (int y = 9; y <= 13; ++y) currentStage()->set(currentStage()->main, 3, y, 3);
+            for (auto& placement : currentStage()->placements)
+                if (placement.actorId == "runner") placement.x = 36.f;
+            engine_.start(project_, 0, {}, true);
+            const float ladderY = engine_.playerY();
+            for (int frame = 0; frame < 40; ++frame) {
+                Input climb;
+                climb.axisY = -1.f;
+                engine_.update(1.f / 60.f, climb);
+            }
+            expect("Holding up climbs a ladder", engine_.playerY() < ladderY - 8.f, "");
+        }
+
+        if (which < 0 || which == 2) {
+            checkKind = SelfTestKind::Ui;
+            fresh();
+            expect("The window title names CabinetCore", windowTitle().find("CabinetCore") == 0, windowTitle());
+            const int savedZoom = zoom_;
+            zoom_ = 2;
+            zoomIn();
+            expect("Zoom in steps up", zoom_ == 3, "");
+            zoom_ = 6;
+            zoomIn();
+            expect("Zoom in stops at the closest view", zoom_ == 6, "");
+            zoom_ = 1;
+            zoomOut();
+            expect("Zoom out stops at the widest view", zoom_ == 1, "");
+            zoom_ = savedZoom;
+            const bool savedHit = showHitboxes_;
+            showHitboxes_ = false;
+            toggleHitboxes();
+            expect("The hitbox control turns the overlay on", showHitboxes_, "");
+            toggleHitboxes();
+            expect("The hitbox control turns the overlay off", !showHitboxes_, "");
+            showHitboxes_ = savedHit;
+
+            bool measured = uiLeftW_ > 100.f && uiLeftH_ > 16.f && uiCanvasW_ > 16.f && uiCanvasH_ > 16.f && uiInspectorW_ > 16.f &&
+                            uiBottomH_ > 16.f;
+            if (!measured && !ImGui::GetCurrentContext() && drawRenderer_) {
+                SDL_Window* window = SDL_RenderGetWindow(drawRenderer_);
+                if (window) {
+                    ImGui::CreateContext();
+                    ImGui_ImplSDL2_InitForSDLRenderer(window, drawRenderer_);
+                    ImGui_ImplSDLRenderer2_Init(drawRenderer_);
+                    ImGui_ImplSDLRenderer2_NewFrame();
+                    ImGui_ImplSDL2_NewFrame();
+                    ImGui::GetIO().DisplaySize = ImVec2(1280.f, 720.f);
+                    ImGui::NewFrame();
+                    const bool wasOpen = selfTestOpen_;
+                    selfTestOpen_ = false;
+                    draw(drawRenderer_);
+                    selfTestOpen_ = wasOpen;
+                    ImGui::Render();
+                    ImGui_ImplSDLRenderer2_Shutdown();
+                    ImGui_ImplSDL2_Shutdown();
+                    ImGui::DestroyContext();
+                    measured = uiLeftW_ > 100.f && uiLeftH_ > 16.f && uiCanvasW_ > 16.f && uiCanvasH_ > 16.f && uiInspectorW_ > 16.f &&
+                               uiBottomH_ > 16.f;
+                }
+            }
+            expect("The editor shows the tools, the map, the inspector, and the painter", measured, "");
+        }
     } catch (const std::exception& ex) {
         expect("Self-test ran to the end", false, ex.what());
     } catch (...) {
@@ -1079,29 +1275,51 @@ int Editor::runSelfTest(SDL_Renderer* renderer) {
 
 void Editor::drawSelfTest() {
     if (!selfTestOpen_) return;
-    ImGui::SetNextWindowSize(ImVec2(720.f, 560.f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(720.f, 640.f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Self-test", &selfTestOpen_)) {
         ImGui::End();
         return;
     }
-    int passed = 0;
-    int failed = 0;
+    const char* names[] = {"Editor", "Gameplay", "UI"};
+    int passed[3] = {};
+    int failedCount[3] = {};
+    int total[3] = {};
     for (const auto& check : selfChecks_) {
-        if (check.pass) ++passed;
-        else ++failed;
+        int kind = static_cast<int>(check.kind);
+        if (kind < 0 || kind > 2) kind = 0;
+        total[kind]++;
+        if (check.pass) passed[kind]++;
+        else failedCount[kind]++;
     }
-    ImGui::Text("%d passed, %d failed. Your project was put back when the test finished.", passed, failed);
-    if (ImGui::Button("Run again")) runSelfTest(nullptr);
+    const int allPassed = passed[0] + passed[1] + passed[2];
+    const int allFailed = failedCount[0] + failedCount[1] + failedCount[2];
+    ImGui::Text("%d passed, %d failed. Your project was put back when the test finished.", allPassed, allFailed);
+    if (ImGui::Button("Run all")) runSelfTest(drawRenderer_, -1);
+    ImGui::SameLine();
+    if (ImGui::Button("Editor")) runSelfTest(drawRenderer_, 0);
+    ImGui::SameLine();
+    if (ImGui::Button("Gameplay")) runSelfTest(drawRenderer_, 1);
+    ImGui::SameLine();
+    if (ImGui::Button("UI")) runSelfTest(drawRenderer_, 2);
     ImGui::Separator();
     ImGui::BeginChild("selftest-results", ImVec2(0, 0), false);
-    for (int group = 0; group < 2; ++group) {
-        for (const auto& check : selfChecks_) {
-            if (check.pass != (group == 1)) continue;
-            const ImVec4 color = check.pass ? ImVec4(0.55f, 0.9f, 0.45f, 1.f) : ImVec4(1.f, 0.4f, 0.35f, 1.f);
-            ImGui::PushStyleColor(ImGuiCol_Text, color);
-            ImGui::Text("%s  %s", check.pass ? "OK" : "FAIL", check.name.c_str());
-            ImGui::PopStyleColor();
-            if (!check.pass && !check.detail.empty()) ImGui::TextWrapped("%s", check.detail.c_str());
+    for (int kind = 0; kind < 3; ++kind) {
+        ImGui::SeparatorText(names[kind]);
+        if (total[kind] == 0) {
+            ImGui::TextUnformatted("Not run.");
+            continue;
+        }
+        ImGui::Text("%d passed, %d failed", passed[kind], failedCount[kind]);
+        for (int group = 0; group < 2; ++group) {
+            for (const auto& check : selfChecks_) {
+                if (static_cast<int>(check.kind) != kind) continue;
+                if (check.pass != (group == 1)) continue;
+                const ImVec4 color = check.pass ? ImVec4(0.55f, 0.9f, 0.45f, 1.f) : ImVec4(1.f, 0.4f, 0.35f, 1.f);
+                ImGui::PushStyleColor(ImGuiCol_Text, color);
+                ImGui::Text("%s  %s", check.pass ? "OK" : "FAIL", check.name.c_str());
+                ImGui::PopStyleColor();
+                if (!check.pass && !check.detail.empty()) ImGui::TextWrapped("%s", check.detail.c_str());
+            }
         }
     }
     ImGui::EndChild();
