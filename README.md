@@ -23,10 +23,10 @@ That produces:
 ## Make a game
 
 ```bash
-./build/cabinetcore
+./cabinetcore.sh
 ```
 
-The demo "Neon Cabinet" opens immediately. It has a run-and-gun rooftop, a vertical shooter with a boss, and a pellet maze.
+The launcher checks that SDL2 is installed, then opens the editor. If SDL2 is missing, it prints the command that installs it. The demo "Neon Cabinet" opens immediately. It has a run-and-gun rooftop, a vertical shooter with a boss, and a pellet maze.
 
 - Left drag paints the collision layer. Right click picks a tile.
 - Tools: Select, Paint, Erase, Fill, Rect, Stamp. Keys 1–6.
@@ -38,7 +38,7 @@ The demo "Neon Cabinet" opens immediately. It has a run-and-gun rooftop, a verti
 Play the build:
 
 ```bash
-./build/cabinetcore --export-demo dist
+./cabinetcore.sh --export-demo dist
 ./dist/cabinet.elf
 ```
 
