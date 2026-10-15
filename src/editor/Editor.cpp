@@ -218,6 +218,91 @@ void Editor::loadDemo() {
     title_ = "CabinetCore — Neon Cabinet";
 }
 
+void Editor::prepareShowcase(int shot) {
+    loadDemo();
+    layoutLeft_ = kLayoutLeft;
+    layoutInspector_ = kLayoutInspector;
+    layoutBottom_ = kLayoutBottom;
+    layoutBottomPaint_ = -1.f;
+    zoom_ = 2;
+    layer_ = 1;
+    tool_ = 1;
+    grid_ = true;
+    showCollision_ = false;
+    showHitboxes_ = false;
+    blocksOpen_ = false;
+    showcaseMenu_ = 0;
+    showcaseScroll_ = -1.f;
+    playing_ = false;
+    leftPage_ = 0;
+    inspectPage_ = 0;
+    paintTarget_ = 0;
+    selectedSprite_ = -1;
+    selectedPlacement_ = -1;
+    selectedTile_ = 0;
+    stageIndex_ = 0;
+    filePickOpen_ = false;
+    blockPath_.clear();
+
+    auto findActor = [this](const char* id) {
+        for (int i = 0; i < static_cast<int>(project_.actors.size()); ++i)
+            if (project_.actors[static_cast<size_t>(i)].id == id) return i;
+        return 0;
+    };
+    auto findSprite = [this](const char* id) {
+        for (int i = 0; i < static_cast<int>(project_.sprites.size()); ++i)
+            if (project_.sprites[static_cast<size_t>(i)].id == id) return i;
+        return 0;
+    };
+
+    if (shot == 1) {
+        showcaseMenu_ = 1;
+    } else if (shot == 2) {
+        leftPage_ = 2;
+        inspectPage_ = 2;
+        selectedActor_ = findActor("slime");
+        if (Stage* stage = currentStage()) {
+            for (int i = 0; i < static_cast<int>(stage->placements.size()); ++i) {
+                if (stage->placements[static_cast<size_t>(i)].actorId == "slime") {
+                    selectedPlacement_ = i;
+                    break;
+                }
+            }
+        }
+    } else if (shot == 3) {
+        leftPage_ = 3;
+        selectedSprite_ = findSprite("hero");
+        paintTarget_ = 0;
+        paintZoom_ = 12;
+    } else if (shot == 4) {
+        const int actor = findActor("runner");
+        selectedActor_ = actor;
+        blockActor_ = actor;
+        blocksOpen_ = true;
+        blockScript_ = 0;
+        ActorDef& hero = project_.actors[static_cast<size_t>(actor)];
+        hero.scripts.clear();
+        Script script;
+        script.hat.kind = BlockKind::WhenButton1;
+        Block jump;
+        jump.kind = BlockKind::Jump;
+        script.body.push_back(jump);
+        Block shoot;
+        shoot.kind = BlockKind::Shoot;
+        script.body.push_back(shoot);
+        hero.scripts.push_back(script);
+    } else if (shot == 6 || shot == 7) {
+        stageIndex_ = 2;
+        zoom_ = 1;
+        if (shot == 6) showcaseScroll_ = 100000.f;
+    } else if (shot == 8 || shot == 9) {
+        stageIndex_ = 4;
+        zoom_ = 2;
+    } else if (shot == 10) {
+        stageIndex_ = 1;
+    }
+}
+
 bool Editor::openProject(const std::string& path, std::string& err) {
     Project loaded;
     if (!Project::load(path, loaded, err)) return false;
@@ -798,7 +883,12 @@ void Editor::paintMap(SDL_Renderer* renderer) {
 
 void Editor::drawMenu() {
     if (!ImGui::BeginMenuBar()) return;
+    if (showcaseMenu_ == 1) ImGui::OpenPopup("File");
     if (ImGui::BeginMenu("File")) {
+        if (showcaseMenu_ == 1) {
+            ImGui::OpenPopup("New");
+            showcaseMenu_ = 2;
+        }
         if (ImGui::BeginMenu("New")) {
             auto beginNew = [&](Project project) {
                 project_ = std::move(project);
@@ -2803,6 +2893,7 @@ void Editor::draw(SDL_Renderer* renderer) {
         else if (leftSize != shownLeft) layoutLeft_ = leftSize;
     }
     ImGui::SameLine(0.f, 0.f);
+    if (showcaseScroll_ >= 0.f) ImGui::SetNextWindowScroll(ImVec2(0.f, showcaseScroll_));
     ImGui::BeginChild("canvas", ImVec2(canvasW, topH), true, ImGuiWindowFlags_HorizontalScrollbar);
     uiCanvasW_ = ImGui::GetWindowWidth();
     uiCanvasH_ = ImGui::GetWindowHeight();

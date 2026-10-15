@@ -9,13 +9,17 @@
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -125,6 +129,183 @@ void presentPlay(SDL_Renderer* renderer, SDL_Texture*& texture, int texW, int te
     SDL_RenderPresent(renderer);
 }
 
+uint32_t pngCrc(const uint8_t* data, size_t size) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) crc = (crc & 1u) ? (0xEDB88320u ^ (crc >> 1)) : (crc >> 1);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+void pngChunk(std::ostream& out, const char* type, const uint8_t* data, size_t size) {
+    const uint32_t length = static_cast<uint32_t>(size);
+    const uint8_t head[4] = {static_cast<uint8_t>(length >> 24), static_cast<uint8_t>(length >> 16),
+                             static_cast<uint8_t>(length >> 8), static_cast<uint8_t>(length)};
+    out.write(reinterpret_cast<const char*>(head), 4);
+    out.write(type, 4);
+    if (size > 0) out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+    std::vector<uint8_t> hashed(4 + size);
+    std::memcpy(hashed.data(), type, 4);
+    if (size > 0) std::memcpy(hashed.data() + 4, data, size);
+    const uint32_t crc = pngCrc(hashed.data(), hashed.size());
+    const uint8_t tail[4] = {static_cast<uint8_t>(crc >> 24), static_cast<uint8_t>(crc >> 16), static_cast<uint8_t>(crc >> 8),
+                             static_cast<uint8_t>(crc)};
+    out.write(reinterpret_cast<const char*>(tail), 4);
+}
+
+bool savePng(const std::filesystem::path& path, const uint8_t* pixels, int width, int height, int pitch) {
+    if (!pixels || width <= 0 || height <= 0) return false;
+    std::vector<uint8_t> raw(static_cast<size_t>(height) * (static_cast<size_t>(width) * 4 + 1));
+    for (int y = 0; y < height; ++y) {
+        uint8_t* row = raw.data() + static_cast<size_t>(y) * (static_cast<size_t>(width) * 4 + 1);
+        row[0] = 0;
+        std::memcpy(row + 1, pixels + static_cast<size_t>(y) * pitch, static_cast<size_t>(width) * 4);
+    }
+
+    std::vector<uint8_t> zlib;
+    zlib.push_back(0x78);
+    zlib.push_back(0x01);
+    uint32_t s1 = 1;
+    uint32_t s2 = 0;
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        const size_t chunk = std::min<size_t>(65535, raw.size() - pos);
+        const bool last = pos + chunk == raw.size();
+        zlib.push_back(last ? 1 : 0);
+        zlib.push_back(static_cast<uint8_t>(chunk & 255));
+        zlib.push_back(static_cast<uint8_t>((chunk >> 8) & 255));
+        const uint16_t negated = static_cast<uint16_t>(~static_cast<uint16_t>(chunk));
+        zlib.push_back(static_cast<uint8_t>(negated & 255));
+        zlib.push_back(static_cast<uint8_t>((negated >> 8) & 255));
+        zlib.insert(zlib.end(), raw.begin() + static_cast<std::ptrdiff_t>(pos), raw.begin() + static_cast<std::ptrdiff_t>(pos + chunk));
+        for (size_t i = 0; i < chunk; ++i) {
+            s1 = (s1 + raw[pos + i]) % 65521u;
+            s2 = (s2 + s1) % 65521u;
+        }
+        pos += chunk;
+    }
+    const uint32_t adler = (s2 << 16) | s1;
+    zlib.push_back(static_cast<uint8_t>(adler >> 24));
+    zlib.push_back(static_cast<uint8_t>(adler >> 16));
+    zlib.push_back(static_cast<uint8_t>(adler >> 8));
+    zlib.push_back(static_cast<uint8_t>(adler));
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+    const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+    out.write(reinterpret_cast<const char*>(sig), 8);
+    const uint8_t ihdr[13] = {static_cast<uint8_t>(width >> 24), static_cast<uint8_t>(width >> 16), static_cast<uint8_t>(width >> 8),
+                              static_cast<uint8_t>(width),       static_cast<uint8_t>(height >> 24), static_cast<uint8_t>(height >> 16),
+                              static_cast<uint8_t>(height >> 8), static_cast<uint8_t>(height),      8,
+                              6,                                 0,                                  0,
+                              0};
+    pngChunk(out, "IHDR", ihdr, 13);
+    pngChunk(out, "IDAT", zlib.data(), zlib.size());
+    pngChunk(out, "IEND", nullptr, 0);
+    return static_cast<bool>(out);
+}
+
+bool captureFrame(SDL_Renderer* renderer, const std::filesystem::path& path) {
+    int width = 0;
+    int height = 0;
+    SDL_GetRendererOutputSize(renderer, &width, &height);
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
+    if (!surface) return false;
+    if (SDL_MUSTLOCK(surface)) SDL_LockSurface(surface);
+    const int read = SDL_RenderReadPixels(renderer, nullptr, SDL_PIXELFORMAT_RGBA32, surface->pixels, surface->pitch);
+    const bool saved = read == 0 && savePng(path, static_cast<uint8_t*>(surface->pixels), width, height, surface->pitch);
+    if (SDL_MUSTLOCK(surface)) SDL_UnlockSurface(surface);
+    SDL_FreeSurface(surface);
+    return saved;
+}
+
+void drawEditorFrame(SDL_Window* window, SDL_Renderer* renderer, cc::Editor& editor, bool closePopups) {
+    ImGui_ImplSDLRenderer2_NewFrame();
+    ImGui_ImplSDL2_NewFrame();
+    ImGui::NewFrame();
+    if (closePopups) ImGui::ClosePopupsExceptModals();
+    SDL_SetWindowTitle(window, editor.windowTitle().c_str());
+    editor.draw(renderer);
+    ImGui::Render();
+    SDL_SetRenderDrawColor(renderer, 12, 10, 16, 255);
+    SDL_RenderClear(renderer);
+    ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+    SDL_RenderPresent(renderer);
+}
+
+int captureShowcase(SDL_Window* window, SDL_Renderer* renderer, cc::Editor& editor, const std::string& directory) {
+    namespace fs = std::filesystem;
+    std::error_code error;
+    fs::create_directories(directory, error);
+    if (error) {
+        std::cerr << "Could not create " << directory << '\n';
+        return 1;
+    }
+    struct Shot {
+        int which;
+        const char* name;
+        bool play;
+    };
+    const Shot shots[] = {
+        {0, "Rooftops stage.png", false},
+        {1, "File menu.png", false},
+        {2, "Actor inspector.png", false},
+        {3, "Pixel painter.png", false},
+        {4, "Block editor.png", false},
+        {5, "Rooftops playtest.png", true},
+        {6, "Star Raid stage.png", false},
+        {7, "Star Raid playtest.png", true},
+        {8, "Pellet Pit stage.png", false},
+        {9, "Pellet Pit playtest.png", true},
+        {10, "Get Ready.png", true},
+    };
+    for (const Shot& shot : shots) {
+        editor.prepareShowcase(shot.which);
+        const fs::path path = fs::path(directory) / shot.name;
+        if (shot.play) {
+            editor.togglePlay();
+            SDL_Texture* texture = nullptr;
+            int texW = 0;
+            int texH = 0;
+            const int frames = shot.which == 10 ? 8 : (shot.which == 7 ? 48 : 36);
+            for (int frame = 0; frame < frames; ++frame) {
+                cc::Input input;
+                if (shot.which == 5) {
+                    input.axisX = 1.f;
+                    input.jumpEdge = frame == 12;
+                    input.shootEdge = frame == 20;
+                } else if (shot.which == 7) {
+                    input.axisY = -1.f;
+                    input.shoot = true;
+                } else if (shot.which == 9) {
+                    input.axisY = -1.f;
+                }
+                editor.updatePlay(1.f / 60.f, input);
+                editor.renderPlay();
+                presentPlay(renderer, texture, texW, texH, editor);
+                texW = editor.playWidth();
+                texH = editor.playHeight();
+            }
+            if (!captureFrame(renderer, path)) {
+                std::cerr << "Could not save " << path.string() << '\n';
+                if (texture) SDL_DestroyTexture(texture);
+                return 1;
+            }
+            if (texture) SDL_DestroyTexture(texture);
+            editor.togglePlay();
+        } else {
+            for (int frame = 0; frame < 4; ++frame) drawEditorFrame(window, renderer, editor, shot.which != 1);
+            if (!captureFrame(renderer, path)) {
+                std::cerr << "Could not save " << path.string() << '\n';
+                return 1;
+            }
+        }
+        std::cout << path.string() << '\n';
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -178,10 +359,12 @@ int main(int argc, char** argv) {
     }
 
     std::string smokePath;
+    std::string shotDir;
     std::string openPath;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--smoke" && i + 1 < argc) smokePath = argv[++i];
+        else if (arg == "--screenshots" && i + 1 < argc) shotDir = argv[++i];
         else if (arg.rfind("--", 0) != 0) openPath = arg;
     }
 
@@ -227,6 +410,17 @@ int main(int argc, char** argv) {
             break;
         }
     }
+    if (!shotDir.empty()) {
+        const int failed = captureShowcase(window, renderer, editor, shotDir);
+        ImGui_ImplSDLRenderer2_Shutdown();
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return failed;
+    }
+
     bool prevF5 = false;
     bool prevF3 = false;
     bool prevJump = false, prevShoot = false, prevStart = false, prevPause = false, prevQuit = false, prevRestart = false,

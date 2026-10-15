@@ -18,6 +18,7 @@ class Editor {
 public:
     Editor();
     void loadDemo();
+    void prepareShowcase(int shot);
     bool openProject(const std::string& path, std::string& err);
     void dropFile(const std::string& path);
     void draw(SDL_Renderer* renderer);
@@ -223,6 +224,8 @@ private:
     bool stroking_ = false;
     bool draggingActor_ = false;
     bool blocksOpen_ = false;
+    int showcaseMenu_ = 0;
+    float showcaseScroll_ = -1.f;
     int blockActor_ = -1;
     int blockScript_ = 0;
     int blockEdit_ = 0;
