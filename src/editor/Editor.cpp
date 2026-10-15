@@ -87,10 +87,65 @@ std::string uniqueId(const Project& project, const std::string& base) {
     return base + "_x";
 }
 
+constexpr float kLayoutLeft = 320.f;
+constexpr float kLayoutInspector = 340.f;
+constexpr float kLayoutBottom = 64.f;
+
 std::string lastProjectFile() {
     const char* home = std::getenv("HOME");
     if (!home || !*home) return {};
     return std::string(home) + "/.config/cabinetcore/last-project";
+}
+
+std::string layoutFile() {
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return {};
+    return std::string(home) + "/.config/cabinetcore/layout";
+}
+
+float clampLayout(float value, float minValue, float maxValue) {
+    if (!(maxValue > minValue)) return minValue;
+    return std::clamp(value, minValue, maxValue);
+}
+
+bool acceptLayout(float left, float inspector, float bottom, float paint) {
+    auto finite = [](float value) { return std::isfinite(value); };
+    if (!finite(left) || !finite(inspector) || !finite(bottom) || !finite(paint)) return false;
+    if (left < 80.f || left > 4000.f || inspector < 80.f || inspector > 4000.f) return false;
+    if (bottom < 24.f || bottom > 2000.f) return false;
+    if (paint < -1.5f || paint > 2000.f) return false;
+    if (paint >= 0.f && paint < 24.f) return false;
+    return true;
+}
+
+void layoutSplitter(const char* id, bool vertical, float thickness, float length, float& size, float minSize, float maxSize, bool invert,
+                    bool& reset) {
+    ImGui::PushID(id);
+    const ImVec2 grip(vertical ? thickness : std::max(1.f, length), vertical ? std::max(1.f, length) : thickness);
+    ImGui::InvisibleButton("grip", grip);
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+    if (hovered || active) ImGui::SetMouseCursor(vertical ? ImGuiMouseCursor_ResizeEW : ImGuiMouseCursor_ResizeNS);
+    reset = hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+    if (!reset && active) {
+        const float delta = vertical ? ImGui::GetIO().MouseDelta.x : ImGui::GetIO().MouseDelta.y;
+        if (delta != 0.f) size = clampLayout(size + (invert ? -delta : delta), minSize, maxSize);
+    }
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    ImU32 color = IM_COL32(92, 62, 34, 255);
+    if (active) color = IM_COL32(245, 160, 50, 255);
+    else if (hovered) color = IM_COL32(190, 110, 36, 255);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    if (vertical) {
+        const float mid = (min.x + max.x) * 0.5f;
+        draw->AddRectFilled(ImVec2(mid - 1.f, min.y), ImVec2(mid + 1.f, max.y), color);
+    } else {
+        const float mid = (min.y + max.y) * 0.5f;
+        draw->AddRectFilled(ImVec2(min.x, mid - 1.f), ImVec2(max.x, mid + 1.f), color);
+    }
+    if (hovered && !active) ImGui::SetTooltip("Drag to resize. Double-click for the normal size.");
+    ImGui::PopID();
 }
 
 void rememberProject(const std::string& path) {
@@ -111,6 +166,7 @@ Editor::Editor() {
     std::getline(in, saved);
     std::string err;
     if (saved.empty() || !std::filesystem::exists(saved) || !openProject(saved, err)) loadDemo();
+    loadLayout();
 }
 
 void Editor::loadDemo() {
@@ -756,6 +812,11 @@ void Editor::drawMenu() {
         ImGui::MenuItem("Hitboxes in playtest", "F3", &showHitboxes_);
         if (ImGui::MenuItem("Zoom in")) zoomIn();
         if (ImGui::MenuItem("Zoom out")) zoomOut();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Save layout")) saveLayout();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keep these panel sizes. The editor opens with them next time.");
+        if (ImGui::MenuItem("Reset layout")) resetLayout();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Put the tools, scene, inspector, and bottom panel back to their normal sizes.");
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Test")) {
@@ -777,6 +838,52 @@ float Editor::snapCoord(float value, int tile) const {
 void Editor::zoomIn() { zoom_ = std::min(6, zoom_ + 1); }
 
 void Editor::zoomOut() { zoom_ = std::max(1, zoom_ - 1); }
+
+void Editor::loadLayout() {
+    const std::string file = layoutFile();
+    if (file.empty()) return;
+    std::ifstream in(file);
+    std::string header;
+    if (!std::getline(in, header) || header != "CCLAYOUT1") return;
+    float left = 0.f, inspector = 0.f, bottom = 0.f, paint = 0.f;
+    if (!(in >> left >> inspector >> bottom >> paint) || !acceptLayout(left, inspector, bottom, paint)) return;
+    layoutLeft_ = left;
+    layoutInspector_ = inspector;
+    layoutBottom_ = bottom;
+    layoutBottomPaint_ = paint;
+}
+
+void Editor::saveLayout() {
+    const std::string file = layoutFile();
+    if (file.empty()) {
+        status_ = "Could not save the layout.";
+        return;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(std::filesystem::path(file).parent_path(), error);
+    std::ofstream out(file);
+    if (!out) {
+        status_ = "Could not save the layout.";
+        return;
+    }
+    out << "CCLAYOUT1\n"
+        << std::lround(layoutLeft_) << ' ' << std::lround(layoutInspector_) << ' ' << std::lround(layoutBottom_) << ' '
+        << std::lround(layoutBottomPaint_) << '\n';
+    status_ = "Layout saved. The editor opens with these panel sizes next time.";
+}
+
+void Editor::resetLayout() {
+    layoutLeft_ = kLayoutLeft;
+    layoutInspector_ = kLayoutInspector;
+    layoutBottom_ = kLayoutBottom;
+    layoutBottomPaint_ = -1.f;
+    const std::string file = layoutFile();
+    if (!file.empty()) {
+        std::error_code error;
+        std::filesystem::remove(file, error);
+    }
+    status_ = "Layout is back to normal.";
+}
 
 void Editor::drawToolbar() {
     for (int i = 0; i < 6; ++i) {
@@ -2529,28 +2636,91 @@ void Editor::draw(SDL_Renderer* renderer) {
         tileOk = selectedTile_ > 0 && selectedTile_ <= static_cast<int>(set->tiles.size()) && set->tileW > 0 && set->tileH > 0;
     if (paintTarget_ == 1 && !tileOk) paintTarget_ = 0;
     const bool painter = (paintTarget_ == 1 && tileOk) || selectedSprite() != nullptr;
-    const float bottom = painter ? std::min(440.f, std::max(240.f, io.DisplaySize.y * 0.42f)) : 64.f;
     ImGui::TextWrapped("%s", status_.c_str());
-    ImGui::BeginChild("left", ImVec2(320, -bottom), true);
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const float availX = std::max(1.f, avail.x);
+    const float availY = std::max(1.f, avail.y);
+    const float split = 6.f;
+    float minLeft = 140.f;
+    float minInspector = 160.f;
+    float minCanvas = 96.f;
+    float minBottom = 40.f;
+    float minTop = 96.f;
+    const float needX = minLeft + minInspector + minCanvas + split * 2.f;
+    if (availX < needX) {
+        const float scale = availX / needX;
+        minLeft *= scale;
+        minInspector *= scale;
+        minCanvas *= scale;
+    }
+    const float needY = minTop + minBottom + split;
+    if (availY < needY) {
+        const float scale = availY / needY;
+        minTop *= scale;
+        minBottom *= scale;
+    }
+    const float maxLeft = std::max(minLeft, availX - minInspector - minCanvas - split * 2.f);
+    const float shownLeft = clampLayout(layoutLeft_, minLeft, maxLeft);
+    const float maxInspector = std::max(minInspector, availX - shownLeft - minCanvas - split * 2.f);
+    const float shownInspector = clampLayout(layoutInspector_, minInspector, maxInspector);
+    const float canvasW = std::max(1.f, availX - shownLeft - shownInspector - split * 2.f);
+    const float autoPaint = std::min(440.f, std::max(240.f, io.DisplaySize.y * 0.42f));
+    const float desiredBottom = painter ? (layoutBottomPaint_ < 0.f ? autoPaint : layoutBottomPaint_) : layoutBottom_;
+    const float maxBottom = std::max(minBottom, availY - minTop - split);
+    const float shownBottom = clampLayout(desiredBottom, minBottom, maxBottom);
+    const float topH = std::max(1.f, availY - shownBottom - split);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.f, 0.f));
+    ImGui::BeginChild("left", ImVec2(shownLeft, topH), true);
     uiLeftW_ = ImGui::GetWindowWidth();
     uiLeftH_ = ImGui::GetWindowHeight();
     drawLeft();
     ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::BeginChild("canvas", ImVec2(-340, -bottom), true, ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::SameLine(0.f, 0.f);
+    {
+        float leftSize = shownLeft;
+        bool resetEdge = false;
+        layoutSplitter("split-left", true, split, topH, leftSize, minLeft, maxLeft, false, resetEdge);
+        if (resetEdge) layoutLeft_ = kLayoutLeft;
+        else if (leftSize != shownLeft) layoutLeft_ = leftSize;
+    }
+    ImGui::SameLine(0.f, 0.f);
+    ImGui::BeginChild("canvas", ImVec2(canvasW, topH), true, ImGuiWindowFlags_HorizontalScrollbar);
     uiCanvasW_ = ImGui::GetWindowWidth();
     uiCanvasH_ = ImGui::GetWindowHeight();
     drawCanvas();
     ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::BeginChild("inspector", ImVec2(0, -bottom), true);
+    ImGui::SameLine(0.f, 0.f);
+    {
+        float inspectorSize = shownInspector;
+        bool resetEdge = false;
+        const float maxInspectorDrag = std::max(minInspector, availX - shownLeft - minCanvas - split * 2.f);
+        layoutSplitter("split-inspector", true, split, topH, inspectorSize, minInspector, maxInspectorDrag, true, resetEdge);
+        if (resetEdge) layoutInspector_ = kLayoutInspector;
+        else if (inspectorSize != shownInspector) layoutInspector_ = inspectorSize;
+    }
+    ImGui::SameLine(0.f, 0.f);
+    ImGui::BeginChild("inspector", ImVec2(shownInspector, topH), true);
     uiInspectorW_ = ImGui::GetWindowWidth();
     drawInspector();
     ImGui::EndChild();
-    ImGui::BeginChild("bottom", ImVec2(0, 0), true);
+    {
+        float bottomSize = shownBottom;
+        bool resetEdge = false;
+        layoutSplitter("split-bottom", false, split, availX, bottomSize, minBottom, maxBottom, true, resetEdge);
+        if (resetEdge) {
+            if (painter) layoutBottomPaint_ = -1.f;
+            else layoutBottom_ = kLayoutBottom;
+        } else if (bottomSize != shownBottom) {
+            if (painter) layoutBottomPaint_ = bottomSize;
+            else layoutBottom_ = bottomSize;
+        }
+    }
+    ImGui::BeginChild("bottom", ImVec2(0.f, shownBottom), true);
     uiBottomH_ = ImGui::GetWindowHeight();
     drawBottom();
     ImGui::EndChild();
+    ImGui::PopStyleVar();
     ImGui::End();
     drawBlockEditor();
     drawSelfTest();

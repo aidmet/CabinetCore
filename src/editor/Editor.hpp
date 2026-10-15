@@ -117,6 +117,9 @@ private:
     void drawSelfTest();
     void zoomIn();
     void zoomOut();
+    void loadLayout();
+    void saveLayout();
+    void resetLayout();
     float snapCoord(float value, int tile) const;
     Tileset* tileset();
     Sprite* selectedSprite();
@@ -149,6 +152,10 @@ private:
     float uiCanvasH_ = 0;
     float uiInspectorW_ = 0;
     float uiBottomH_ = 0;
+    float layoutLeft_ = 320.f;
+    float layoutInspector_ = 340.f;
+    float layoutBottom_ = 64.f;
+    float layoutBottomPaint_ = -1.f;
     SDL_Renderer* drawRenderer_ = nullptr;
     SDL_Texture* mapTex_ = nullptr;
     SDL_Texture* tilesetTex_ = nullptr;

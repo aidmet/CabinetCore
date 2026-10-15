@@ -164,6 +164,26 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
         std::ifstream in(remember);
         std::getline(in, rememberText);
     }
+    const float savedLayoutLeft = layoutLeft_;
+    const float savedLayoutInspector = layoutInspector_;
+    const float savedLayoutBottom = layoutBottom_;
+    const float savedLayoutPaint = layoutBottomPaint_;
+    std::filesystem::path layoutPath;
+    std::string layoutText;
+    bool hadLayout = false;
+    {
+        const char* home = std::getenv("HOME");
+        if (home && *home) layoutPath = std::filesystem::path(home) / ".config" / "cabinetcore" / "layout";
+    }
+    if (!layoutPath.empty() && std::filesystem::exists(layoutPath)) {
+        hadLayout = true;
+        std::ifstream in(layoutPath, std::ios::binary);
+        char buf[4096];
+        while (in) {
+            in.read(buf, sizeof(buf));
+            layoutText.append(buf, static_cast<size_t>(in.gcount()));
+        }
+    }
     const std::filesystem::path temp = std::filesystem::temp_directory_path() / "cabinetcore-selftest";
 
     auto restore = [&]() {
@@ -229,6 +249,19 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
                 if (out) out << rememberText << '\n';
             } else if (std::filesystem::exists(remember)) {
                 std::filesystem::remove(remember, error);
+            }
+        }
+        layoutLeft_ = savedLayoutLeft;
+        layoutInspector_ = savedLayoutInspector;
+        layoutBottom_ = savedLayoutBottom;
+        layoutBottomPaint_ = savedLayoutPaint;
+        if (!layoutPath.empty()) {
+            if (hadLayout) {
+                std::filesystem::create_directories(layoutPath.parent_path(), error);
+                std::ofstream out(layoutPath, std::ios::binary);
+                if (out) out << layoutText;
+            } else if (std::filesystem::exists(layoutPath)) {
+                std::filesystem::remove(layoutPath, error);
             }
         }
     };
@@ -1256,29 +1289,73 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
             expect("The hitbox control turns the overlay off", !showHitboxes_, "");
             showHitboxes_ = savedHit;
 
+            layoutLeft_ = 410.f;
+            layoutInspector_ = 260.f;
+            layoutBottom_ = 88.f;
+            layoutBottomPaint_ = 310.f;
+            if (!layoutPath.empty()) {
+                saveLayout();
+                layoutLeft_ = 111.f;
+                layoutInspector_ = 111.f;
+                layoutBottom_ = 40.f;
+                layoutBottomPaint_ = -1.f;
+                loadLayout();
+                expect("A saved layout comes back",
+                       layoutLeft_ == 410.f && layoutInspector_ == 260.f && layoutBottom_ == 88.f && layoutBottomPaint_ == 310.f, "");
+                {
+                    std::ofstream broken(layoutPath, std::ios::binary);
+                    broken << "nope\n";
+                }
+                loadLayout();
+                expect("A broken layout file keeps the current panels",
+                       layoutLeft_ == 410.f && layoutInspector_ == 260.f && layoutBottom_ == 88.f && layoutBottomPaint_ == 310.f, "");
+            }
+            resetLayout();
+            expect("Reset layout restores the normal panels",
+                   layoutLeft_ == 320.f && layoutInspector_ == 340.f && layoutBottom_ == 64.f && layoutBottomPaint_ < 0.f, "");
+            if (!layoutPath.empty())
+                expect("Reset layout clears the saved file", !std::filesystem::exists(layoutPath), "");
+
+            auto drawEditor = [&]() {
+                if (ImGui::GetCurrentContext() || !drawRenderer_) return false;
+                SDL_Window* window = SDL_RenderGetWindow(drawRenderer_);
+                if (!window) return false;
+                ImGui::CreateContext();
+                ImGui_ImplSDL2_InitForSDLRenderer(window, drawRenderer_);
+                ImGui_ImplSDLRenderer2_Init(drawRenderer_);
+                ImGui_ImplSDLRenderer2_NewFrame();
+                ImGui_ImplSDL2_NewFrame();
+                ImGui::GetIO().DisplaySize = ImVec2(1280.f, 720.f);
+                ImGui::NewFrame();
+                const bool wasOpen = selfTestOpen_;
+                selfTestOpen_ = false;
+                selectedSprite_ = 0;
+                draw(drawRenderer_);
+                selfTestOpen_ = wasOpen;
+                ImGui::Render();
+                ImGui_ImplSDLRenderer2_Shutdown();
+                ImGui_ImplSDL2_Shutdown();
+                ImGui::DestroyContext();
+                return true;
+            };
+            const bool drew = drawEditor();
             bool measured = uiLeftW_ > 100.f && uiLeftH_ > 16.f && uiCanvasW_ > 16.f && uiCanvasH_ > 16.f && uiInspectorW_ > 16.f &&
                             uiBottomH_ > 16.f;
-            if (!measured && !ImGui::GetCurrentContext() && drawRenderer_) {
-                SDL_Window* window = SDL_RenderGetWindow(drawRenderer_);
-                if (window) {
-                    ImGui::CreateContext();
-                    ImGui_ImplSDL2_InitForSDLRenderer(window, drawRenderer_);
-                    ImGui_ImplSDLRenderer2_Init(drawRenderer_);
-                    ImGui_ImplSDLRenderer2_NewFrame();
-                    ImGui_ImplSDL2_NewFrame();
-                    ImGui::GetIO().DisplaySize = ImVec2(1280.f, 720.f);
-                    ImGui::NewFrame();
-                    const bool wasOpen = selfTestOpen_;
-                    selfTestOpen_ = false;
-                    draw(drawRenderer_);
-                    selfTestOpen_ = wasOpen;
-                    ImGui::Render();
-                    ImGui_ImplSDLRenderer2_Shutdown();
-                    ImGui_ImplSDL2_Shutdown();
-                    ImGui::DestroyContext();
-                    measured = uiLeftW_ > 100.f && uiLeftH_ > 16.f && uiCanvasW_ > 16.f && uiCanvasH_ > 16.f && uiInspectorW_ > 16.f &&
-                               uiBottomH_ > 16.f;
-                }
+            if (drew) {
+                expect("The normal layout sizes the tools, scene, and painter",
+                       uiLeftW_ > 300.f && uiLeftW_ < 340.f && uiInspectorW_ > 320.f && uiInspectorW_ < 360.f && uiCanvasW_ > 16.f &&
+                           uiBottomH_ > 220.f && uiBottomH_ < 460.f,
+                       "");
+                layoutLeft_ = 220.f;
+                layoutInspector_ = 210.f;
+                layoutBottomPaint_ = 120.f;
+                drawEditor();
+                expect("Dragged panel sizes are used on the next view",
+                       uiLeftW_ > 200.f && uiLeftW_ < 240.f && uiInspectorW_ > 190.f && uiInspectorW_ < 230.f && uiBottomH_ > 100.f &&
+                           uiBottomH_ < 140.f,
+                       "");
+                measured = uiLeftW_ > 100.f && uiLeftH_ > 16.f && uiCanvasW_ > 16.f && uiCanvasH_ > 16.f && uiInspectorW_ > 16.f &&
+                           uiBottomH_ > 16.f;
             }
             expect("The editor shows the tools, the map, the inspector, and the painter", measured, "");
         }
