@@ -2080,10 +2080,19 @@ void Editor::drawTileFlags() {
 void Editor::drawInspector() {
     Stage* stage = currentStage();
     if (!stage) return;
-    if (ImGui::CollapsingHeader("Stage", ImGuiTreeNodeFlags_DefaultOpen)) drawStageSettings(*stage);
-    if (ImGui::CollapsingHeader("Tile", ImGuiTreeNodeFlags_DefaultOpen)) drawTileFlags();
+    if (ImGui::CollapsingHeader("Stage", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::PushID("stage");
+        drawStageSettings(*stage);
+        ImGui::PopID();
+    }
+    if (ImGui::CollapsingHeader("Tile", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::PushID("tile");
+        drawTileFlags();
+        ImGui::PopID();
+    }
     if (selectedPlacement_ >= 0 && selectedPlacement_ < static_cast<int>(stage->placements.size())) {
         if (ImGui::CollapsingHeader("Placed actor", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::PushID("placed");
             Placement& placement = stage->placements[selectedPlacement_];
             const Tileset* set = tileset();
             const int tileW = set && set->tileW > 0 ? set->tileW : 16;
@@ -2094,7 +2103,8 @@ void Editor::drawInspector() {
             if (ImGui::InputFloat("Y", &y)) placement.y = snapCoord(y, tileH);
             if (ImGui::BeginCombo("Actor", placement.actorId.c_str())) {
                 for (const auto& actor : project_.actors) {
-                    if (ImGui::Selectable(actor.name.c_str(), actor.id == placement.actorId)) placement.actorId = actor.id;
+                    if (ImGui::Selectable((actor.name + "##" + actor.id).c_str(), actor.id == placement.actorId))
+                        placement.actorId = actor.id;
                 }
                 ImGui::EndCombo();
             }
@@ -2103,11 +2113,15 @@ void Editor::drawInspector() {
                 stage->placements.erase(stage->placements.begin() + selectedPlacement_);
                 selectedPlacement_ = -1;
             }
+            ImGui::PopID();
         }
     }
     if (selectedActor_ >= 0 && selectedActor_ < static_cast<int>(project_.actors.size())) {
-        if (ImGui::CollapsingHeader("Behavior", ImGuiTreeNodeFlags_DefaultOpen))
+        if (ImGui::CollapsingHeader("Behavior", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::PushID("actor");
             drawActorEditor(project_.actors[selectedActor_]);
+            ImGui::PopID();
+        }
     }
 }
 
