@@ -377,10 +377,8 @@ int play(const std::string& path) {
     if (!cc::Project::load(path, project, err)) return fail(err);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) return fail(SDL_GetError());
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
-    const int scale = std::max(1, std::min(6, project.settings.scale));
     SDL_Window* window = SDL_CreateWindow(project.settings.title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                          project.settings.viewW * scale, project.settings.viewH * scale,
-                                          SDL_WINDOW_RESIZABLE);
+                                          project.settings.viewW, project.settings.viewH, SDL_WINDOW_FULLSCREEN_DESKTOP);
     if (!window) return fail(SDL_GetError());
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
