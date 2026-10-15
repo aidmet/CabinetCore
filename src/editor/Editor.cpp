@@ -47,10 +47,20 @@ const Swatch kPalette[] = {
     {180, 180, 190}, {20, 180, 170},  {240, 240, 210}, {30, 60, 140},
 };
 
+void beginField(const char* label) {
+    ImGui::AlignTextToFramePadding();
+    const float column = ImGui::GetCursorPosX() + 118.f;
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(column);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+}
+
 bool editString(const char* label, std::string& value) {
     char buffer[256];
     std::snprintf(buffer, sizeof(buffer), "%s", value.c_str());
-    if (ImGui::InputText(label, buffer, sizeof(buffer))) {
+    const std::string id = std::string("##") + label;
+    beginField(label);
+    if (ImGui::InputText(id.c_str(), buffer, sizeof(buffer))) {
         value = buffer;
         return true;
     }
@@ -60,8 +70,10 @@ bool editString(const char* label, std::string& value) {
 bool editEnum(const char* label, uint32_t& value, const char* const* names, int count) {
     int current = static_cast<int>(value);
     if (current < 0 || current >= count) current = 0;
+    const std::string id = std::string("##") + label;
+    beginField(label);
     bool changed = false;
-    if (ImGui::BeginCombo(label, names[current])) {
+    if (ImGui::BeginCombo(id.c_str(), names[current])) {
         for (int i = 0; i < count; ++i) {
             if (ImGui::Selectable(names[i], i == current)) {
                 value = static_cast<uint32_t>(i);
@@ -71,6 +83,18 @@ bool editEnum(const char* label, uint32_t& value, const char* const* names, int 
         ImGui::EndCombo();
     }
     return changed;
+}
+
+bool editFloat(const char* label, float& value) {
+    const std::string id = std::string("##") + label;
+    beginField(label);
+    return ImGui::InputFloat(id.c_str(), &value);
+}
+
+bool editInt(const char* label, int& value) {
+    const std::string id = std::string("##") + label;
+    beginField(label);
+    return ImGui::InputInt(id.c_str(), &value);
 }
 
 std::string uniqueId(const Project& project, const std::string& base) {
@@ -897,21 +921,35 @@ void Editor::drawToolbar() {
     ImGui::SameLine();
     if (ImGui::Button("Playtest  F5")) togglePlay();
     ImGui::SameLine();
-    ImGui::Checkbox("Hitboxes", &showHitboxes_);
-    ImGui::SameLine();
-    ImGui::Checkbox("Snap", &snapActors_);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Actors and the hero land on the tile grid while you move them.");
-    ImGui::SameLine();
     if (ImGui::Button("Build  F6")) buildGame();
-    ImGui::SameLine();
-    ImGui::Text("Zoom %d", zoom_);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl+Wheel over the scene zooms in and out.");
-    ImGui::SameLine();
+
     ImGui::RadioButton("Backdrop", &layer_, 0);
     ImGui::SameLine();
     ImGui::RadioButton("Collision", &layer_, 1);
     ImGui::SameLine();
     ImGui::RadioButton("Foreground", &layer_, 2);
+    ImGui::SameLine();
+    ImGui::TextUnformatted("|");
+    ImGui::SameLine();
+    if (ImGui::Button("-##zoomout")) zoomOut();
+    ImGui::SameLine();
+    ImGui::Text("Zoom %d", zoom_);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl+Wheel over the scene zooms in and out.");
+    ImGui::SameLine();
+    if (ImGui::Button("+##zoomin")) zoomIn();
+    ImGui::SameLine();
+    ImGui::Checkbox("Hitboxes", &showHitboxes_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Snap", &snapActors_);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Actors and the hero land on the tile grid while you move them.");
+    if (!hoverHint_.empty()) {
+        const float width = ImGui::CalcTextSize(hoverHint_.c_str()).x;
+        const float right = ImGui::GetWindowWidth() - width - 12.f;
+        if (ImGui::GetCursorPosX() + 24.f < right) {
+            ImGui::SameLine(right);
+            ImGui::TextDisabled("%s", hoverHint_.c_str());
+        }
+    }
 }
 
 uint16_t Editor::findTile(uint32_t need, uint32_t avoid) {
@@ -1851,11 +1889,11 @@ void Editor::drawLeft() {
         if (ImGui::BeginTabItem("Game")) {
             editString("Title", project_.settings.title);
             editString("Author", project_.settings.author);
-            ImGui::InputInt("View width", &project_.settings.viewW);
-            ImGui::InputInt("View height", &project_.settings.viewH);
-            ImGui::InputInt("Window scale", &project_.settings.scale);
-            ImGui::InputInt("Lives", &project_.settings.lives);
-            ImGui::InputInt("Health", &project_.settings.maxHealth);
+            editInt("View width", project_.settings.viewW);
+            editInt("View height", project_.settings.viewH);
+            editInt("Window scale", project_.settings.scale);
+            editInt("Lives", project_.settings.lives);
+            editInt("Health", project_.settings.maxHealth);
             project_.settings.viewW = std::clamp(project_.settings.viewW, 160, 640);
             project_.settings.viewH = std::clamp(project_.settings.viewH, 120, 480);
             project_.settings.scale = std::clamp(project_.settings.scale, 1, 6);
@@ -1873,6 +1911,7 @@ void Editor::drawLeft() {
 }
 
 void Editor::drawCanvas() {
+    hoverHint_.clear();
     if (ImGui::IsWindowHovered() && ImGui::GetIO().KeyCtrl) zoomWheel(ImGui::GetIO().MouseWheel);
     Stage* stage = currentStage();
     if (!stage || !mapTex_) {
@@ -1892,12 +1931,11 @@ void Editor::drawCanvas() {
     const int tx = static_cast<int>(std::floor(localX / tileW));
     const int ty = static_cast<int>(std::floor(localY / tileH));
     if (hovered) {
-        status_ = "Tile " + std::to_string(tx) + "," + std::to_string(ty) + "   " + kTools[tool_] +
-                  "   layer " + std::string(layer_ == 0 ? "backdrop" : layer_ == 2 ? "foreground" : "collision");
         if (genDrag_ == 1) status_ = "Drag the stretch, then release.";
-        if (genDrag_ == 2) status_ = "Drag the area, then release.";
-        if (genDrag_ == 3) status_ = "Drag the chunk to copy, then release.";
-        if (genDrag_ == 4) status_ = "Click where the chunk should land.";
+        else if (genDrag_ == 2) status_ = "Drag the area, then release.";
+        else if (genDrag_ == 3) status_ = "Drag the chunk to copy, then release.";
+        else if (genDrag_ == 4) status_ = "Click where the chunk should land.";
+        else hoverHint_ = "Tile " + std::to_string(tx) + ", " + std::to_string(ty);
         const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
         const bool release = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
@@ -1960,7 +1998,7 @@ void Editor::drawCanvas() {
             stroking_ = false;
             draggingActor_ = false;
         }
-        if (!armedPlugin_.empty()) status_ += "   plugin tool " + armedPlugin_;
+        if (!armedPlugin_.empty()) hoverHint_ += "   " + armedPlugin_;
     }
     if (genDown_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) finishGeneratorDrag();
     if (ImGui::IsWindowFocused() && ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedPlacement_ >= 0 &&
@@ -1976,6 +2014,7 @@ void Editor::drawStageSettings(Stage& stage) {
     editString("Id", stage.id);
     editString("Music id", stage.musicId);
     editString("Message", stage.message);
+    ImGui::Separator();
     uint32_t physics = static_cast<uint32_t>(stage.physics);
     uint32_t scroll = static_cast<uint32_t>(stage.scroll);
     uint32_t complete = static_cast<uint32_t>(stage.complete);
@@ -1983,10 +2022,11 @@ void Editor::drawStageSettings(Stage& stage) {
     if (editEnum("Scroll", scroll, kScroll, 6)) stage.scroll = static_cast<ScrollMode>(scroll);
     if (editEnum("Complete", complete, kComplete, 4)) stage.complete = static_cast<CompleteMode>(complete);
     ImGui::Checkbox("Intermission", &stage.intermission);
-    ImGui::InputFloat("Auto scroll", &stage.autoScroll);
-    ImGui::InputFloat("Gravity", &stage.gravity);
-    ImGui::InputFloat("Jump", &stage.jumpVel);
-    ImGui::InputFloat("Player speed", &stage.playerSpeed);
+    ImGui::Separator();
+    editFloat("Auto scroll", stage.autoScroll);
+    editFloat("Gravity", stage.gravity);
+    editFloat("Jump", stage.jumpVel);
+    editFloat("Player speed", stage.playerSpeed);
     static Stage* synced = nullptr;
     static int newW = 20;
     static int newH = 15;
@@ -1995,9 +2035,10 @@ void Editor::drawStageSettings(Stage& stage) {
         newW = stage.width;
         newH = stage.height;
     }
-    ImGui::InputInt("Width", &newW);
-    ImGui::InputInt("Height", &newH);
-    if (ImGui::Button("Resize stage")) resizeCurrentStage(newW, newH);
+    ImGui::Separator();
+    editInt("Width", newW);
+    editInt("Height", newH);
+    if (ImGui::Button("Resize stage", ImVec2(-FLT_MIN, 0))) resizeCurrentStage(newW, newH);
 }
 
 void Editor::drawActorEditor(ActorDef& actor) {
@@ -2027,25 +2068,25 @@ void Editor::drawActorEditor(ActorDef& actor) {
     }
     editString("Projectile id", actor.projectileId);
     editString("Drop id", actor.dropActorId);
-    ImGui::InputFloat("Hit width", &actor.hitW);
-    ImGui::InputFloat("Hit height", &actor.hitH);
-    ImGui::InputFloat("Speed", &actor.behavior.speed);
-    ImGui::InputFloat("Fire every", &actor.behavior.fireInterval);
-    ImGui::InputFloat("Shot speed", &actor.behavior.shotSpeed);
-    ImGui::InputFloat("Spread", &actor.behavior.spread);
-    ImGui::InputInt("Burst", &actor.behavior.burst);
-    ImGui::InputInt("HP", &actor.behavior.hp);
-    ImGui::InputInt("Touch damage", &actor.behavior.touchDamage);
+    editFloat("Hit width", actor.hitW);
+    editFloat("Hit height", actor.hitH);
+    editFloat("Speed", actor.behavior.speed);
+    editFloat("Fire every", actor.behavior.fireInterval);
+    editFloat("Shot speed", actor.behavior.shotSpeed);
+    editFloat("Spread", actor.behavior.spread);
+    editInt("Burst", actor.behavior.burst);
+    editInt("HP", actor.behavior.hp);
+    editInt("Touch damage", actor.behavior.touchDamage);
     ImGui::Checkbox("Stomp from above", &actor.behavior.stomp);
     if (actor.behavior.pattern == AiPattern::Platform) {
-        ImGui::InputFloat("Travel distance", &actor.behavior.amplitude);
+        editFloat("Travel distance", actor.behavior.amplitude);
         ImGui::TextWrapped("Facing rides left and right from where you placed it. Up or Down rides vertically. Speed is how fast it moves.");
     }
     if (actor.pickup == Pickup::Special)
         ImGui::TextWrapped(
             "Button 2 still fires the normal shot. Hold it to spend one special. Amount is how many you pick up. A projectile fires that shot; leave it empty to clear the screen. Burst above 1 spreads.");
-    ImGui::InputInt("Score", &actor.behavior.score);
-    ImGui::InputInt("Pickup amount", &actor.pickupAmount);
+    editInt("Score", actor.behavior.score);
+    editInt("Pickup amount", actor.pickupAmount);
     ImGui::Checkbox("Gravity", &actor.behavior.gravity);
     ImGui::Checkbox("Turn at edges", &actor.behavior.turnAtEdge);
     ImGui::Checkbox("Needs key", &actor.needsKey);
@@ -2085,8 +2126,8 @@ void Editor::drawTileFlags() {
     flag("Ice", TileIce);
     flag("Destructible", TileDestructible);
     flag("Crumble", TileCrumble);
-    ImGui::InputInt("Anim frames", &tile.frames);
-    ImGui::InputFloat("Anim fps", &tile.fps);
+    editInt("Anim frames", tile.frames);
+    editFloat("Anim fps", tile.fps);
 }
 
 void Editor::drawInspector() {
@@ -2111,9 +2152,10 @@ void Editor::drawInspector() {
             const int tileH = set && set->tileH > 0 ? set->tileH : 16;
             float x = placement.x;
             float y = placement.y;
-            if (ImGui::InputFloat("X", &x)) placement.x = snapCoord(x, tileW);
-            if (ImGui::InputFloat("Y", &y)) placement.y = snapCoord(y, tileH);
-            if (ImGui::BeginCombo("Actor", placement.actorId.c_str())) {
+            if (editFloat("X", x)) placement.x = snapCoord(x, tileW);
+            if (editFloat("Y", y)) placement.y = snapCoord(y, tileH);
+            beginField("Actor");
+            if (ImGui::BeginCombo("##placed-actor", placement.actorId.c_str())) {
                 for (const auto& actor : project_.actors) {
                     if (ImGui::Selectable((actor.name + "##" + actor.id).c_str(), actor.id == placement.actorId))
                         placement.actorId = actor.id;
@@ -2616,10 +2658,13 @@ void Editor::drawBottom() {
         return;
     }
     if (sprite && tileOk) {
+        if (paintTarget_ == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.48f, 0.14f, 1.f));
         if (ImGui::Button("Sprite")) paintTarget_ = 0;
+        if (paintTarget_ == 0) ImGui::PopStyleColor();
         ImGui::SameLine();
+        if (paintTarget_ == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.48f, 0.14f, 1.f));
         if (ImGui::Button("Tile")) paintTarget_ = 1;
-        ImGui::SameLine();
+        if (paintTarget_ == 1) ImGui::PopStyleColor();
     } else if (!sprite) {
         paintTarget_ = 1;
     }
@@ -2634,20 +2679,20 @@ void Editor::drawBottom() {
     }
     if (!sprite) return;
     ImGui::Text("Pixel painter — %s", sprite->name.c_str());
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
+    ImGui::SetNextItemWidth(72);
     ImGui::InputInt("Frame w", &sprite->frameW);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
+    ImGui::SetNextItemWidth(72);
     ImGui::InputInt("Frame h", &sprite->frameH);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
+    ImGui::SetNextItemWidth(72);
     ImGui::InputInt("Frames", &sprite->frames);
     normalizeSprite(*sprite);
     spriteFrame_ = std::clamp(spriteFrame_, 0, sprite->frames - 1);
+    ImGui::SetNextItemWidth(160.f);
     ImGui::SliderInt("Frame", &spriteFrame_, 0, sprite->frames - 1);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
+    ImGui::SetNextItemWidth(72);
     ImGui::InputFloat("FPS", &sprite->fps);
     if (spriteFrame_ > 0 && ImGui::Button("Copy previous frame")) copySpriteFrame(*sprite, spriteFrame_);
     drawSheetPainter(sprite->rgba, sprite->imgW, spriteFrame_ * sprite->frameW, 0, sprite->frameW, sprite->frameH);
@@ -2697,7 +2742,7 @@ void Editor::draw(SDL_Renderer* renderer) {
     const float maxInspector = std::max(minInspector, availX - shownLeft - minCanvas - split * 2.f);
     const float shownInspector = clampLayout(layoutInspector_, minInspector, maxInspector);
     const float canvasW = std::max(1.f, availX - shownLeft - shownInspector - split * 2.f);
-    const float autoPaint = std::min(440.f, std::max(240.f, io.DisplaySize.y * 0.42f));
+    const float autoPaint = std::min(300.f, std::max(220.f, io.DisplaySize.y * 0.32f));
     const float desiredBottom = painter ? (layoutBottomPaint_ < 0.f ? autoPaint : layoutBottomPaint_) : layoutBottom_;
     const float maxBottom = std::max(minBottom, availY - minTop - split);
     const float shownBottom = clampLayout(desiredBottom, minBottom, maxBottom);

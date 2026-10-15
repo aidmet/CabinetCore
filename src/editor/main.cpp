@@ -25,6 +25,8 @@ void applyStyle() {
     style.FrameRounding = 3.f;
     style.GrabRounding = 3.f;
     style.ScrollbarRounding = 3.f;
+    style.FramePadding = ImVec2(6.f, 3.f);
+    style.ItemSpacing = ImVec2(8.f, 5.f);
     ImVec4* colors = style.Colors;
     colors[ImGuiCol_WindowBg] = ImVec4(0.09f, 0.08f, 0.12f, 1.f);
     colors[ImGuiCol_ChildBg] = ImVec4(0.11f, 0.10f, 0.15f, 1.f);

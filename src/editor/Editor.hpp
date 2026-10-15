@@ -149,6 +149,7 @@ private:
     Canvas map_;
     std::string path_;
     std::string status_ = "Demo loaded. F5 plays, F6 builds game.dat and cabinet.elf.";
+    std::string hoverHint_;
     std::string title_;
     std::vector<Snapshot> undo_;
     std::vector<Snapshot> redo_;
