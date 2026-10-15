@@ -1,5 +1,7 @@
 #include "player/Engine.hpp"
 
+#include "plugin/Plugins.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -1066,6 +1068,34 @@ void Engine::applyStatement(Ent* ent, const Block& block) {
             else playerFrame_ = static_cast<int>(std::lround(block.num));
             break;
         case BlockKind::SendMessage: deliverMessage(block.name); break;
+        case BlockKind::Plugin: {
+            const LoadedPlugin* plugin = findPlugin(block.name);
+            if (!plugin || !plugin->desc || !plugin->desc->onBlock) break;
+            PluginHost host;
+            host.user = this;
+            host.log = [](void*, const char*) {};
+            host.addScore = [](void* user, int amount) { static_cast<Engine*>(user)->score_ += amount; };
+            host.hurtHero = [](void* user, int amount) {
+                if (amount > 0) static_cast<Engine*>(user)->hurtPlayer(amount);
+            };
+            host.playSound = [](void* user, const char* id) {
+                if (id && id[0]) static_cast<Engine*>(user)->sfx(id);
+            };
+            host.actorX = ent ? ent->x : px_;
+            host.actorY = ent ? ent->y : py_;
+            host.heroX = px_;
+            host.heroY = py_;
+            host.score = score_;
+            host.stageW = st ? st->width : 0;
+            host.stageH = st ? st->height : 0;
+            host.tileW = tileW_;
+            host.tileH = tileH_;
+            host.num = block.num;
+            host.num2 = block.num2;
+            host.pluginName = block.name.c_str();
+            callPlugin(plugin->desc->onBlock, host);
+            break;
+        }
         case BlockKind::WhenMessage:
         case BlockKind::WhenSpawned:
         case BlockKind::EveryFrame:

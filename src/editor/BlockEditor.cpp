@@ -1,5 +1,7 @@
 #include "editor/Editor.hpp"
 
+#include "plugin/Plugins.hpp"
+
 #include "imgui.h"
 
 #include <algorithm>
@@ -44,8 +46,18 @@ const char* blockTitle(BlockKind kind) {
         case BlockKind::SpawnActor: return "spawn actor";
         case BlockKind::ShowFrame: return "show frame";
         case BlockKind::SendMessage: return "send message";
+        case BlockKind::Plugin: return "plugin";
     }
     return "block";
+}
+
+std::string blockLabel(const Block& block) {
+    if (block.kind == BlockKind::Plugin) {
+        if (const LoadedPlugin* plugin = findPlugin(block.name))
+            if (!plugin->title.empty()) return plugin->title;
+        if (!block.name.empty()) return block.name;
+    }
+    return blockTitle(block.kind);
 }
 
 ImVec4 blockColor(BlockKind kind) {
@@ -166,6 +178,12 @@ void acceptDrop(Drop& drop, int script, const std::vector<int>& path, bool insid
 
 }  // namespace
 
+void Editor::insertPluginBlock(const std::string& name) {
+    Block block = makeBlock(BlockKind::Plugin);
+    block.name = name;
+    insertPrepared(std::move(block));
+}
+
 void Editor::insertBlock(BlockKind kind) {
     if (blockActor_ < 0 || blockActor_ >= static_cast<int>(project_.actors.size())) return;
     ActorDef& actor = project_.actors[static_cast<size_t>(blockActor_)];
@@ -179,6 +197,13 @@ void Editor::insertBlock(BlockKind kind) {
             break;
         }
     }
+    insertPrepared(std::move(block));
+}
+
+void Editor::insertPrepared(Block block) {
+    if (blockActor_ < 0 || blockActor_ >= static_cast<int>(project_.actors.size())) return;
+    ActorDef& actor = project_.actors[static_cast<size_t>(blockActor_)];
+    const BlockKind kind = block.kind;
     if (isHat(kind)) {
         Script script;
         script.hat = block;
@@ -366,6 +391,19 @@ void Editor::drawBlockEditor() {
             paletteButton(BlockKind::ShowFrame, addKind);
             paletteButton(BlockKind::SendMessage, addKind);
         }
+        bool anyPlugin = false;
+        for (const auto& plugin : loadedPlugins())
+            if (plugin.kind == PluginKind::Block) anyPlugin = true;
+        if (anyPlugin && ImGui::CollapsingHeader("Plugins", ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (const auto& plugin : loadedPlugins()) {
+                if (plugin.kind != PluginKind::Block) continue;
+                const std::string label = plugin.title.empty() ? plugin.name : plugin.title;
+                ImGui::PushID(plugin.name.c_str());
+                if (ImGui::Button(label.c_str(), ImVec2(-1, 0))) insertPluginBlock(plugin.name);
+                if (ImGui::IsItemHovered() && !plugin.summary.empty()) ImGui::SetTooltip("%s", plugin.summary.c_str());
+                ImGui::PopID();
+            }
+        }
     ImGui::EndChild();
     if (!stack) ImGui::SameLine();
 
@@ -402,7 +440,8 @@ void Editor::drawBlockEditor() {
                 else ImGui::PushStyleColor(ImGuiCol_Button, blockColor(block.kind));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, blockColor(block.kind));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, blockColor(block.kind));
-                if (ImGui::Button(blockTitle(block.kind), ImVec2(-1.f, 0))) {
+                const std::string label = blockLabel(block);
+                if (ImGui::Button(label.c_str(), ImVec2(-1.f, 0))) {
                     blockScript_ = shown;
                     blockPath_ = here;
                 }
@@ -555,6 +594,9 @@ void Editor::drawBlockEditor() {
                         }
                         break;
                     }
+                    case BlockKind::Plugin:
+                        ImGui::TextUnformatted("Runs the loaded plugin.");
+                        break;
                     default: break;
                 }
                 if (block.kind == BlockKind::If || block.kind == BlockKind::Repeat) {
@@ -580,7 +622,8 @@ void Editor::drawBlockEditor() {
                 ImGui::PushStyleColor(ImGuiCol_Button, blockColor(script.hat.kind));
                 const float removeW = ImGui::CalcTextSize("Remove script").x + ImGui::GetStyle().FramePadding.x * 2.f;
                 const float hatRoom = ImGui::GetContentRegionAvail().x - removeW - ImGui::GetStyle().ItemSpacing.x;
-                if (ImGui::Button(blockTitle(script.hat.kind), ImVec2(hatRoom > 80.f ? hatRoom : -1.f, 0))) {
+                const std::string hatLabel = blockLabel(script.hat);
+                if (ImGui::Button(hatLabel.c_str(), ImVec2(hatRoom > 80.f ? hatRoom : -1.f, 0))) {
                     blockScript_ = s;
                     blockPath_.clear();
                 }

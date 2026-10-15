@@ -38,10 +38,11 @@ add_library(ccore STATIC
     src/common/AudioDevice.cpp
     src/player/Engine.cpp
     src/demo/Demo.cpp
+    src/plugin/Plugins.cpp
 )
 target_include_directories(ccore PUBLIC src ${SDL2_INCLUDE} ${CMAKE_SOURCE_DIR}/third_party)
 target_compile_definitions(ccore PUBLIC SDL_MAIN_HANDLED)
-target_link_libraries(ccore PUBLIC ${SDL2_LIB} Threads::Threads)
+target_link_libraries(ccore PUBLIC ${SDL2_LIB} Threads::Threads ${CMAKE_DL_LIBS})
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(ccore PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -65,3 +66,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(cabinetcore PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
 add_dependencies(cabinetcore cabinet)
+
+add_executable(cabinet-plugin src/plugin/Create.cpp)
+target_link_libraries(cabinet-plugin PRIVATE ccore)
+target_compile_definitions(cabinet-plugin PRIVATE "CABINET_ROOT=\"${CMAKE_SOURCE_DIR}\"")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(cabinet-plugin PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif()

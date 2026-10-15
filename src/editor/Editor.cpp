@@ -5,6 +5,7 @@
 #include "common/Export.hpp"
 #include "common/Synth.hpp"
 #include "demo/Demo.hpp"
+#include "plugin/Plugins.hpp"
 
 #include <SDL.h>
 
@@ -167,6 +168,7 @@ Editor::Editor() {
     std::string err;
     if (saved.empty() || !std::filesystem::exists(saved) || !openProject(saved, err)) loadDemo();
     loadLayout();
+    loadRememberedPlugins();
 }
 
 void Editor::loadDemo() {
@@ -797,6 +799,10 @@ void Editor::drawMenu() {
             if (!file.empty()) saveProject(file);
         }
         if (ImGui::MenuItem("Build game", "F6")) buildGame();
+        if (ImGui::MenuItem("Load plugin...")) {
+            const std::string file = pickFile(false, "*.ccplugin");
+            if (!file.empty()) loadEditorPlugin(file);
+        }
         if (ImGui::MenuItem("Quit")) status_ = "Close the window to quit.";
         ImGui::EndMenu();
     }
@@ -1576,6 +1582,27 @@ void Editor::drawBuildTab() {
     ImGui::Checkbox("Show collision", &showCollision_);
     if (showCollision_)
         ImGui::TextWrapped("Red is solid, green is one-way, yellow is a ladder, pink is a hazard, and blue is water.");
+    ImGui::Separator();
+    ImGui::TextUnformatted("Plugins");
+    if (loadedPlugins().empty()) {
+        ImGui::TextWrapped("Load a .ccplugin from the File menu. Make one with cabinet-plugin.");
+    } else {
+        for (const auto& plugin : loadedPlugins()) {
+            ImGui::PushID(plugin.name.c_str());
+            const std::string label = plugin.title.empty() ? plugin.name : plugin.title;
+            ImGui::Text("%s", label.c_str());
+            if (!plugin.summary.empty()) ImGui::TextWrapped("%s", plugin.summary.c_str());
+            if (plugin.kind == PluginKind::Tool) {
+                const bool armed = armedPlugin_ == plugin.name;
+                if (ImGui::Button(armed ? "Stop tool" : "Use on the scene")) armedPlugin_ = armed ? std::string() : plugin.name;
+            } else if (plugin.kind == PluginKind::Generator) {
+                if (ImGui::Button("Run on this stage")) runPluginGenerator(plugin.name);
+            } else {
+                ImGui::TextWrapped("Open an actor's blocks. This plugin is in the Plugins list there.");
+            }
+            ImGui::PopID();
+        }
+    }
     if (levelChecked_) {
         ImGui::BeginChild("levelnotes", ImVec2(0.f, 120.f), true);
         for (const auto& note : levelNotes_) ImGui::BulletText("%s", note.c_str());
@@ -1922,6 +1949,8 @@ void Editor::drawCanvas() {
                 const ImVec2 b(origin.x + (x1 + 1) * tileW * zoom_, origin.y + (y1 + 1) * tileH * zoom_);
                 ImGui::GetWindowDrawList()->AddRect(a, b, IM_COL32(255, 210, 60, 255), 0.f, 0, 2.f);
             }
+        } else if (!armedPlugin_.empty() && click) {
+            runPluginTool(tx, ty);
         } else {
             if (click) {
                 pushUndo();
@@ -1949,6 +1978,7 @@ void Editor::drawCanvas() {
             stroking_ = false;
             draggingActor_ = false;
         }
+        if (!armedPlugin_.empty()) status_ += "   plugin tool " + armedPlugin_;
     }
     if (genDown_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) finishGeneratorDrag();
     if (ImGui::IsWindowFocused() && ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedPlacement_ >= 0 &&
@@ -2808,10 +2838,113 @@ void Editor::dropFile(const std::string& path) {
         if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
     if (ext == ".png") importPng(path);
     else if (ext == ".wav") importWav(path);
+    else if (ext == ".ccplugin") loadEditorPlugin(path);
     else {
         std::string err;
         if (!openProject(path, err)) status_ = err;
     }
+}
+
+void Editor::fillPluginHost(PluginHost& host, int tx, int ty) {
+    Stage* stage = currentStage();
+    const Tileset* set = tileset();
+    host = {};
+    host.abi = kPluginAbi;
+    host.user = this;
+    host.tileX = tx;
+    host.tileY = ty;
+    host.stageW = stage ? stage->width : 0;
+    host.stageH = stage ? stage->height : 0;
+    host.tileW = set && set->tileW > 0 ? set->tileW : 16;
+    host.tileH = set && set->tileH > 0 ? set->tileH : 16;
+    host.log = [](void* user, const char* text) {
+        if (text) static_cast<Editor*>(user)->status_ = text;
+    };
+    host.setStatus = host.log;
+    host.paintTile = [](void* user, int x, int y, int tile) {
+        auto* editor = static_cast<Editor*>(user);
+        Stage* stage = editor->currentStage();
+        if (!stage) return;
+        editor->ensureLayers(*stage);
+        const int value = std::max(0, std::min(tile, 65535));
+        stage->set(editor->activeLayer(), x, y, static_cast<uint16_t>(value));
+    };
+    host.placeActor = [](void* user, const char* id, float x, float y) {
+        auto* editor = static_cast<Editor*>(user);
+        Stage* stage = editor->currentStage();
+        if (!stage || !id || !id[0]) return;
+        const ActorDef* actor = editor->project_.findActor(id);
+        if (!actor) {
+            editor->status_ = std::string("No actor named ") + id;
+            return;
+        }
+        const Tileset* set = editor->tileset();
+        const int tileW = set && set->tileW > 0 ? set->tileW : 16;
+        const int tileH = set && set->tileH > 0 ? set->tileH : 16;
+        const int tileX = static_cast<int>(std::floor(x / static_cast<float>(tileW)));
+        const int tileY = static_cast<int>(std::floor(y / static_cast<float>(tileH)));
+        editor->placeActor(*stage, actor, tileX, tileY);
+    };
+}
+
+void Editor::loadEditorPlugin(const std::string& path) {
+    std::string err;
+    if (!loadPlugin(path, err)) {
+        status_ = err;
+        return;
+    }
+    rememberPlugin(path);
+    std::error_code error;
+    const auto absolute = std::filesystem::absolute(path, error);
+    const std::string full = absolute.empty() ? path : absolute.string();
+    const LoadedPlugin* plugin = nullptr;
+    for (const auto& loaded : loadedPlugins())
+        if (loaded.path == full) plugin = &loaded;
+    if (!plugin) {
+        status_ = "Loaded " + path;
+        return;
+    }
+    if (plugin->kind == PluginKind::Tool)
+        status_ = "Loaded " + plugin->title + ". Arm it from the Build tab, then click the scene.";
+    else if (plugin->kind == PluginKind::Generator)
+        status_ = "Loaded " + plugin->title + ". Run it from the Build tab.";
+    else
+        status_ = "Loaded " + plugin->title + ". It is in the Plugins list of the block editor.";
+}
+
+void Editor::runPluginTool(int tx, int ty) {
+    const LoadedPlugin* plugin = findPlugin(armedPlugin_);
+    if (!plugin || !plugin->desc || !plugin->desc->onTool) {
+        status_ = "That plugin tool is not loaded.";
+        armedPlugin_.clear();
+        return;
+    }
+    pushUndo();
+    PluginHost host;
+    fillPluginHost(host, tx, ty);
+    host.pluginName = plugin->name.c_str();
+    const std::string before = status_;
+    callPlugin(plugin->desc->onTool, host);
+    if (status_ == before) status_ = "Used " + plugin->title + ".";
+}
+
+void Editor::runPluginGenerator(const std::string& name) {
+    const LoadedPlugin* plugin = findPlugin(name);
+    if (!plugin || !plugin->desc || !plugin->desc->onGenerate) {
+        status_ = "That generator is not loaded.";
+        return;
+    }
+    if (!currentStage()) {
+        status_ = "Add a stage first.";
+        return;
+    }
+    pushUndo();
+    PluginHost host;
+    fillPluginHost(host, 0, 0);
+    host.pluginName = plugin->name.c_str();
+    const std::string before = status_;
+    callPlugin(plugin->desc->onGenerate, host);
+    if (status_ == before) status_ = "Ran " + plugin->title + ".";
 }
 
 void Editor::saveProject(const std::string& path) {
@@ -2836,6 +2969,7 @@ void Editor::buildGame() {
         return;
     }
     status_ = "Built " + (root / "game.dat").string() + " and " + (root / "cabinet.elf").string();
+    if (!loadedPlugins().empty()) status_ += ". Plugins were copied beside the game.";
 }
 
 std::string Editor::pickFile(bool save, const char* filter) {

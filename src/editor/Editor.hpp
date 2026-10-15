@@ -4,6 +4,7 @@
 #include "common/Canvas.hpp"
 #include "common/Types.hpp"
 #include "player/Engine.hpp"
+#include "plugin/Plugin.hpp"
 
 #include <string>
 #include <vector>
@@ -100,6 +101,12 @@ private:
     void deleteCurrentStage();
     void resizeCurrentStage(int width, int height);
     void insertBlock(BlockKind kind);
+    void insertPluginBlock(const std::string& name);
+    void insertPrepared(Block block);
+    void loadEditorPlugin(const std::string& path);
+    void fillPluginHost(PluginHost& host, int tx, int ty);
+    void runPluginTool(int tx, int ty);
+    void runPluginGenerator(const std::string& name);
     void applyBlockEdit();
     void normalizeSprite(Sprite& sprite);
     void plotSprite(Sprite& sprite, int frame, int x, int y, bool erase);
@@ -190,6 +197,7 @@ private:
     bool grid_ = true;
     bool snapActors_ = false;
     bool playing_ = false;
+    std::string armedPlugin_;
     bool stroking_ = false;
     bool draggingActor_ = false;
     bool blocksOpen_ = false;

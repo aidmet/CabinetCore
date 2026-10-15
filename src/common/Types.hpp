@@ -105,7 +105,8 @@ enum class BlockKind : uint32_t {
     SpawnActor = 46,
     ShowFrame = 47,
     SendMessage = 48,
-    WhenMessage = 49
+    WhenMessage = 49,
+    Plugin = 50
 };
 
 enum class BlockTest : uint32_t {

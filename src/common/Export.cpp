@@ -1,5 +1,7 @@
 #include "common/Export.hpp"
 
+#include "plugin/Plugins.hpp"
+
 #include <filesystem>
 
 namespace cc {
@@ -36,6 +38,23 @@ bool exportGame(const Project& project, const std::string& outDir, const std::st
     fs::permissions(dest,
                     fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
                     fs::perm_options::add, ec);
+    if (!loadedPlugins().empty()) {
+        const fs::path plugins = fs::path(outDir) / "plugins";
+        fs::create_directories(plugins, ec);
+        if (ec) {
+            err = "Could not create the plugins folder.";
+            return false;
+        }
+        for (const auto& plugin : loadedPlugins()) {
+            const fs::path from(plugin.path);
+            if (!fs::exists(from)) continue;
+            fs::copy_file(from, plugins / from.filename(), fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                err = "Could not copy " + from.filename().string();
+                return false;
+            }
+        }
+    }
     return true;
 }
 
