@@ -207,6 +207,12 @@ bool createPlugin(const Answers& answers, std::string& err) {
         return false;
     }
     ::chmod((folder / "build").string().c_str(), 0755);
+    std::error_code removeError;
+    fs::remove(folder / "build.cpp", removeError);
+    if (removeError) {
+        err = "Compiled ./build, but could not remove build.cpp.";
+        return false;
+    }
     std::cout << "Wrote " << folder.string() << "\n"
               << "The sdk has the CabinetCore types. src/plugin.cpp registers the plugin.\n"
               << "Edit it, then run ./build inside the folder. That writes " << answers.name << ".ccplugin.\n"
@@ -240,6 +246,8 @@ int selfTest() {
     answers.out = dir.string();
     std::string err;
     if (!createPlugin(answers, err)) return fail(err);
+    if (fs::exists(dir / "build.cpp")) return fail("build.cpp was left next to the build tool.");
+    if (!fs::exists(dir / "build")) return fail("The build tool was not written.");
     const std::string build = (dir / "build").string();
     if (std::system(("\"" + build + "\"").c_str()) != 0) return fail("The plugin build failed.");
     const fs::path packed = dir / "Blink Test.ccplugin";

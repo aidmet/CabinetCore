@@ -2,3 +2,4 @@ build/
 dist/
 *.ppm
 *.o
+Test Plugin
