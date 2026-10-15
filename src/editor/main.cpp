@@ -139,6 +139,31 @@ int main(int argc, char** argv) {
             std::cout << "Exported " << dir << "/game.dat and cabinet.elf\n";
             return 0;
         }
+        if (std::string(argv[i]) == "--selftest") {
+            if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
+                std::cerr << SDL_GetError() << '\n';
+                return 1;
+            }
+            SDL_Window* window = SDL_CreateWindow("CabinetCore self-test", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 320,
+                                                  240, SDL_WINDOW_HIDDEN);
+            SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE) : nullptr;
+            cc::Editor editor;
+            const int failed = editor.runSelfTest(renderer);
+            int passed = 0;
+            for (const auto& check : editor.selfChecks()) {
+                if (check.pass) {
+                    ++passed;
+                    continue;
+                }
+                std::cerr << "FAIL " << check.name << '\n';
+                if (!check.detail.empty()) std::cerr << "  " << check.detail << '\n';
+            }
+            std::cout << "editor selftest " << passed << " passed, " << failed << " failed\n";
+            if (renderer) SDL_DestroyRenderer(renderer);
+            if (window) SDL_DestroyWindow(window);
+            SDL_Quit();
+            return failed == 0 ? 0 : 1;
+        }
     }
 
     std::string smokePath;

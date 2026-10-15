@@ -58,7 +58,7 @@ set_target_properties(cabinet PROPERTIES OUTPUT_NAME "cabinet.elf")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cabinet_player_path.h"
     CONTENT "#pragma once\n#define CABINET_PLAYER_PATH \"$<TARGET_FILE:cabinet>\"\n")
 
-add_executable(cabinetcore src/editor/main.cpp src/editor/Editor.cpp src/editor/BlockEditor.cpp)
+add_executable(cabinetcore src/editor/main.cpp src/editor/Editor.cpp src/editor/BlockEditor.cpp src/editor/SelfTest.cpp)
 target_include_directories(cabinetcore PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(cabinetcore PRIVATE ccore imgui)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

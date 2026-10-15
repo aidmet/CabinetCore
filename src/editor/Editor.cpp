@@ -493,11 +493,12 @@ void Editor::flood(int tx, int ty, uint16_t from, uint16_t to) {
     if (!stage || from == to) return;
     std::vector<std::pair<int, int>> stack;
     stack.push_back({tx, ty});
-    int guard = stage->width * stage->height + 4;
+    int guard = stage->width * stage->height * 8 + 8;
     while (!stack.empty() && guard-- > 0) {
         const int x = stack.back().first;
         const int y = stack.back().second;
         stack.pop_back();
+        if (x < 0 || y < 0 || x >= stage->width || y >= stage->height) continue;
         if (stage->get(activeLayer(), x, y) != from) continue;
         stage->set(activeLayer(), x, y, to);
         stack.push_back({x + 1, y});
@@ -740,6 +741,10 @@ void Editor::drawMenu() {
         ImGui::MenuItem("Collision colors", nullptr, &showCollision_);
         if (ImGui::MenuItem("Zoom in")) zoom_ = std::min(6, zoom_ + 1);
         if (ImGui::MenuItem("Zoom out")) zoom_ = std::max(1, zoom_ - 1);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Test")) {
+        if (ImGui::MenuItem("Run self-test")) runSelfTest(nullptr);
         ImGui::EndMenu();
     }
     ImGui::EndMenuBar();
@@ -1031,21 +1036,27 @@ void Editor::populateKeyDoor() {
         for (int x = x0; x <= x1; ++x)
             if (y - 1 >= 0 && standable(*stage, x, y) && !standable(*stage, x, y - 1)) spots.push_back({x, y - 1});
     pushUndo();
-    int keyX = x0;
-    int doorX = x1;
-    int standY = std::max(0, y1 - 1);
+    bool placedKey = false;
+    bool placedDoor = false;
     if (!spots.empty()) {
-        keyX = spots.front().first;
-        standY = spots.front().second;
-        doorX = spots.back().first;
-        int doorY = spots.back().second;
-        if (key && door && keyX == doorX && standY == doorY) {
-            if (doorX + 1 < stage->width) doorX++;
-            else if (keyX > 0) keyX--;
+        if (key) {
+            for (const auto& spot : spots)
+                if (placeActor(*stage, key, spot.first, spot.second)) {
+                    placedKey = true;
+                    break;
+                }
         }
-        if (key) placeActor(*stage, key, keyX, standY);
-        if (door) placeActor(*stage, door, doorX, doorY);
+        if (door) {
+            for (auto spot = spots.rbegin(); spot != spots.rend(); ++spot)
+                if (placeActor(*stage, door, spot->first, spot->second)) {
+                    placedDoor = true;
+                    break;
+                }
+        }
     } else {
+        int keyX = x0;
+        int doorX = x1;
+        const int standY = std::max(0, y1 - 1);
         if (key && door && keyX == doorX) {
             if (doorX + 1 < stage->width) doorX++;
             else if (keyX > 0) keyX--;
@@ -1056,10 +1067,12 @@ void Editor::populateKeyDoor() {
             stage->set(stage->main, keyX, standY + 1, tile);
             stage->set(stage->main, doorX, standY + 1, tile);
         }
-        if (key) placeActor(*stage, key, keyX, standY);
-        if (door) placeActor(*stage, door, doorX, standY);
+        if (key) placedKey = placeActor(*stage, key, keyX, standY);
+        if (door) placedDoor = placeActor(*stage, door, doorX, standY);
     }
-    status_ = "Placed the key and the door.";
+    if (placedKey && placedDoor) status_ = "Placed the key and the door.";
+    else if (placedKey || placedDoor) status_ = "Placed what would fit.";
+    else status_ = "No open spot for the key and door.";
 }
 
 void Editor::finishGeneratorDrag() {
@@ -1533,10 +1546,7 @@ void Editor::drawLeft() {
             ImGui::SameLine();
             if (ImGui::Button("Duplicate")) addStage(true);
             ImGui::SameLine();
-            if (ImGui::Button("Delete") && project_.stages.size() > 1) {
-                project_.stages.erase(project_.stages.begin() + stageIndex_);
-                stageIndex_ = std::min(stageIndex_, static_cast<int>(project_.stages.size()) - 1);
-            }
+            if (ImGui::Button("Delete")) deleteCurrentStage();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Tiles")) {
@@ -1814,10 +1824,7 @@ void Editor::drawStageSettings(Stage& stage) {
     }
     ImGui::InputInt("Width", &newW);
     ImGui::InputInt("Height", &newH);
-    if (ImGui::Button("Resize stage")) {
-        pushUndo();
-        stage.resize(std::clamp(newW, 5, 200), std::clamp(newH, 5, 200));
-    }
+    if (ImGui::Button("Resize stage")) resizeCurrentStage(newW, newH);
 }
 
 void Editor::drawActorEditor(ActorDef& actor) {
@@ -1921,6 +1928,124 @@ void Editor::drawInspector() {
     }
 }
 
+void Editor::normalizeSprite(Sprite& sprite) {
+    sprite.frameW = std::clamp(sprite.frameW, 1, 128);
+    sprite.frameH = std::clamp(sprite.frameH, 1, 128);
+    sprite.frames = std::clamp(sprite.frames, 1, 32);
+    const int imgW = sprite.frameW * sprite.frames;
+    const int imgH = sprite.frameH;
+    if (sprite.imgW == imgW && sprite.imgH == imgH && static_cast<int>(sprite.rgba.size()) == imgW * imgH * 4) return;
+    std::vector<uint8_t> next(static_cast<size_t>(imgW) * imgH * 4, 0);
+    const int copyW = std::min(imgW, sprite.imgW);
+    const int copyH = std::min(imgH, sprite.imgH);
+    for (int y = 0; y < copyH; ++y) {
+        if (sprite.imgW <= 0) break;
+        std::memcpy(next.data() + static_cast<size_t>(y) * imgW * 4, sprite.rgba.data() + static_cast<size_t>(y) * sprite.imgW * 4,
+                    static_cast<size_t>(copyW) * 4);
+    }
+    sprite.rgba.swap(next);
+    sprite.imgW = imgW;
+    sprite.imgH = imgH;
+}
+
+size_t spritePixel(const Sprite& sprite, int frame, int x, int y) {
+    const int originX = frame * sprite.frameW;
+    return (static_cast<size_t>(y) * sprite.imgW + originX + x) * 4;
+}
+
+void Editor::plotSprite(Sprite& sprite, int frame, int x, int y, bool erase) {
+    if (x < 0 || y < 0 || x >= sprite.frameW || y >= sprite.frameH || frame < 0 || frame >= sprite.frames) return;
+    const size_t i = spritePixel(sprite, frame, x, y);
+    if (i + 3 >= sprite.rgba.size()) return;
+    if (erase || colorIndex_ < 0) {
+        sprite.rgba[i] = sprite.rgba[i + 1] = sprite.rgba[i + 2] = sprite.rgba[i + 3] = 0;
+    } else {
+        sprite.rgba[i] = paintR_;
+        sprite.rgba[i + 1] = paintG_;
+        sprite.rgba[i + 2] = paintB_;
+        sprite.rgba[i + 3] = 255;
+    }
+}
+
+void Editor::floodSprite(Sprite& sprite, int frame, int x, int y, bool erase) {
+    if (x < 0 || y < 0 || x >= sprite.frameW || y >= sprite.frameH || frame < 0 || frame >= sprite.frames) return;
+    const size_t start = spritePixel(sprite, frame, x, y);
+    if (start + 3 >= sprite.rgba.size()) return;
+    const uint8_t tr = sprite.rgba[start];
+    const uint8_t tg = sprite.rgba[start + 1];
+    const uint8_t tb = sprite.rgba[start + 2];
+    const uint8_t ta = sprite.rgba[start + 3];
+    const uint8_t nr = erase || colorIndex_ < 0 ? 0 : paintR_;
+    const uint8_t ng = erase || colorIndex_ < 0 ? 0 : paintG_;
+    const uint8_t nb = erase || colorIndex_ < 0 ? 0 : paintB_;
+    const uint8_t na = erase || colorIndex_ < 0 ? 0 : 255;
+    if (tr == nr && tg == ng && tb == nb && ta == na) return;
+    std::vector<std::pair<int, int>> stack;
+    stack.push_back({x, y});
+    int guard = sprite.frameW * sprite.frameH * 8 + 8;
+    while (!stack.empty() && guard-- > 0) {
+        const int cx = stack.back().first;
+        const int cy = stack.back().second;
+        stack.pop_back();
+        if (cx < 0 || cy < 0 || cx >= sprite.frameW || cy >= sprite.frameH) continue;
+        const size_t i = spritePixel(sprite, frame, cx, cy);
+        if (i + 3 >= sprite.rgba.size()) continue;
+        if (sprite.rgba[i] != tr || sprite.rgba[i + 1] != tg || sprite.rgba[i + 2] != tb || sprite.rgba[i + 3] != ta) continue;
+        plotSprite(sprite, frame, cx, cy, erase);
+        stack.push_back({cx + 1, cy});
+        stack.push_back({cx - 1, cy});
+        stack.push_back({cx, cy + 1});
+        stack.push_back({cx, cy - 1});
+    }
+}
+
+void Editor::strokeSprite(Sprite& sprite, int frame, int x0, int y0, int x1, int y1, bool erase) {
+    int dx = std::abs(x1 - x0);
+    const int sx = x0 < x1 ? 1 : -1;
+    int dy = -std::abs(y1 - y0);
+    const int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        plotSprite(sprite, frame, x0, y0, erase);
+        if (x0 == x1 && y0 == y1) break;
+        const int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+void Editor::copySpriteFrame(Sprite& sprite, int frame) {
+    if (frame <= 0 || frame >= sprite.frames || sprite.frameW <= 0 || sprite.imgW <= 0) return;
+    const int previous = (frame - 1) * sprite.frameW;
+    const int current = frame * sprite.frameW;
+    for (int y = 0; y < sprite.frameH; ++y) {
+        const size_t row = static_cast<size_t>(y) * sprite.imgW;
+        if ((row + current + sprite.frameW) * 4 > sprite.rgba.size()) return;
+        std::memcpy(sprite.rgba.data() + (row + current) * 4, sprite.rgba.data() + (row + previous) * 4,
+                    static_cast<size_t>(sprite.frameW) * 4);
+    }
+}
+
+void Editor::pickSprite(Sprite& sprite, int frame, int x, int y) {
+    if (x < 0 || y < 0 || x >= sprite.frameW || y >= sprite.frameH || frame < 0 || frame >= sprite.frames) return;
+    const size_t i = spritePixel(sprite, frame, x, y);
+    if (i + 3 >= sprite.rgba.size()) return;
+    if (sprite.rgba[i + 3] == 0) {
+        colorIndex_ = -1;
+        return;
+    }
+    colorIndex_ = 16;
+    paintR_ = sprite.rgba[i];
+    paintG_ = sprite.rgba[i + 1];
+    paintB_ = sprite.rgba[i + 2];
+}
+
 void Editor::drawBottom() {
     Sprite* sprite = selectedSprite();
     if (!sprite) {
@@ -1938,24 +2063,7 @@ void Editor::drawBottom() {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(80);
     ImGui::InputInt("Frames", &sprite->frames);
-    sprite->frameW = std::clamp(sprite->frameW, 1, 128);
-    sprite->frameH = std::clamp(sprite->frameH, 1, 128);
-    sprite->frames = std::clamp(sprite->frames, 1, 32);
-    const int imgW = sprite->frameW * sprite->frames;
-    const int imgH = sprite->frameH;
-    if (sprite->imgW != imgW || sprite->imgH != imgH || static_cast<int>(sprite->rgba.size()) != imgW * imgH * 4) {
-        std::vector<uint8_t> next(static_cast<size_t>(imgW) * imgH * 4, 0);
-        const int copyW = std::min(imgW, sprite->imgW);
-        const int copyH = std::min(imgH, sprite->imgH);
-        for (int y = 0; y < copyH; ++y) {
-            if (sprite->imgW <= 0) break;
-            std::memcpy(next.data() + static_cast<size_t>(y) * imgW * 4,
-                        sprite->rgba.data() + static_cast<size_t>(y) * sprite->imgW * 4, copyW * 4);
-        }
-        sprite->rgba.swap(next);
-        sprite->imgW = imgW;
-        sprite->imgH = imgH;
-    }
+    normalizeSprite(*sprite);
     spriteFrame_ = std::clamp(spriteFrame_, 0, sprite->frames - 1);
     ImGui::SliderInt("Frame", &spriteFrame_, 0, sprite->frames - 1);
     ImGui::SameLine();
@@ -1972,15 +2080,7 @@ void Editor::drawBottom() {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(120);
     ImGui::SliderInt("Zoom", &paintZoom_, 4, 32);
-    if (spriteFrame_ > 0 && ImGui::Button("Copy previous frame")) {
-        const int previous = (spriteFrame_ - 1) * sprite->frameW;
-        const int current = spriteFrame_ * sprite->frameW;
-        for (int y = 0; y < sprite->frameH; ++y) {
-            std::memcpy(sprite->rgba.data() + (static_cast<size_t>(y) * sprite->imgW + current) * 4,
-                        sprite->rgba.data() + (static_cast<size_t>(y) * sprite->imgW + previous) * 4,
-                        static_cast<size_t>(sprite->frameW) * 4);
-        }
-    }
+    if (spriteFrame_ > 0 && ImGui::Button("Copy previous frame")) copySpriteFrame(*sprite, spriteFrame_);
     for (int i = 0; i < 16; ++i) {
         if (i) ImGui::SameLine();
         ImGui::PushID(i);
@@ -2007,69 +2107,6 @@ void Editor::drawBottom() {
     const int originX = spriteFrame_ * sprite->frameW;
     auto indexOf = [&](int x, int y) -> size_t {
         return (static_cast<size_t>(y) * sprite->imgW + originX + x) * 4;
-    };
-    auto plot = [&](int x, int y, bool erase) {
-        if (x < 0 || y < 0 || x >= sprite->frameW || y >= sprite->frameH) return;
-        const size_t i = indexOf(x, y);
-        if (i + 3 >= sprite->rgba.size()) return;
-        if (erase || colorIndex_ < 0) {
-            sprite->rgba[i] = sprite->rgba[i + 1] = sprite->rgba[i + 2] = sprite->rgba[i + 3] = 0;
-        } else {
-            sprite->rgba[i] = paintR_;
-            sprite->rgba[i + 1] = paintG_;
-            sprite->rgba[i + 2] = paintB_;
-            sprite->rgba[i + 3] = 255;
-        }
-    };
-    auto sameColor = [&](int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-        const size_t i = indexOf(x, y);
-        return sprite->rgba[i] == r && sprite->rgba[i + 1] == g && sprite->rgba[i + 2] == b && sprite->rgba[i + 3] == a;
-    };
-    auto flood = [&](int x, int y, bool erase) {
-        if (x < 0 || y < 0 || x >= sprite->frameW || y >= sprite->frameH) return;
-        const size_t start = indexOf(x, y);
-        const uint8_t tr = sprite->rgba[start];
-        const uint8_t tg = sprite->rgba[start + 1];
-        const uint8_t tb = sprite->rgba[start + 2];
-        const uint8_t ta = sprite->rgba[start + 3];
-        const uint8_t nr = erase || colorIndex_ < 0 ? 0 : paintR_;
-        const uint8_t ng = erase || colorIndex_ < 0 ? 0 : paintG_;
-        const uint8_t nb = erase || colorIndex_ < 0 ? 0 : paintB_;
-        const uint8_t na = erase || colorIndex_ < 0 ? 0 : 255;
-        if (tr == nr && tg == ng && tb == nb && ta == na) return;
-        std::vector<std::pair<int, int>> stack;
-        stack.push_back({x, y});
-        while (!stack.empty()) {
-            const int cx = stack.back().first;
-            const int cy = stack.back().second;
-            stack.pop_back();
-            if (cx < 0 || cy < 0 || cx >= sprite->frameW || cy >= sprite->frameH || !sameColor(cx, cy, tr, tg, tb, ta)) continue;
-            plot(cx, cy, erase);
-            stack.push_back({cx + 1, cy});
-            stack.push_back({cx - 1, cy});
-            stack.push_back({cx, cy + 1});
-            stack.push_back({cx, cy - 1});
-        }
-    };
-    auto stroke = [&](int x0, int y0, int x1, int y1, bool erase) {
-        int dx = std::abs(x1 - x0);
-        int sx = x0 < x1 ? 1 : -1;
-        int dy = -std::abs(y1 - y0);
-        int sy = y0 < y1 ? 1 : -1;
-        int err = dx + dy;
-        for (;;) {
-            plot(x0, y0, erase);
-            if (x0 == x1 && y0 == y1) break;
-            const int e2 = 2 * err;
-            if (e2 >= dy) {
-                err += dy;
-                x0 += sx;
-            }
-            if (e2 <= dx) {
-                err += dx;
-                y0 += sy;
-            }
-        }
     };
     ImGui::BeginChild("pixels", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -2101,22 +2138,14 @@ void Editor::drawBottom() {
         paintY0_ = py;
     }
     if (paintLine_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-        if (inside) stroke(paintX0_, paintY0_, px, py, false);
+        if (inside) strokeSprite(*sprite, spriteFrame_, paintX0_, paintY0_, px, py, false);
         paintLine_ = false;
     }
-    if (leftClick && inside && paintTool_ == 1) flood(px, py, false);
-    if (rightDown && inside && paintTool_ == 1 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) flood(px, py, true);
-    if (leftClick && inside && paintTool_ == 2) {
-        const size_t i = indexOf(px, py);
-        if (sprite->rgba[i + 3] == 0) colorIndex_ = -1;
-        else {
-            colorIndex_ = 16;
-            paintR_ = sprite->rgba[i];
-            paintG_ = sprite->rgba[i + 1];
-            paintB_ = sprite->rgba[i + 2];
-        }
-    }
-    if (inside && paintTool_ == 0 && (leftDown || rightDown)) plot(px, py, rightDown);
+    if (leftClick && inside && paintTool_ == 1) floodSprite(*sprite, spriteFrame_, px, py, false);
+    if (rightDown && inside && paintTool_ == 1 && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+        floodSprite(*sprite, spriteFrame_, px, py, true);
+    if (leftClick && inside && paintTool_ == 2) pickSprite(*sprite, spriteFrame_, px, py);
+    if (inside && paintTool_ == 0 && (leftDown || rightDown)) plotSprite(*sprite, spriteFrame_, px, py, rightDown);
     if (paintLine_ && inside) {
         const ImVec2 a(origin.x + (paintX0_ + 0.5f) * scale, origin.y + (paintY0_ + 0.5f) * scale);
         const ImVec2 b(origin.x + (px + 0.5f) * scale, origin.y + (py + 0.5f) * scale);
@@ -2126,6 +2155,7 @@ void Editor::drawBottom() {
 }
 
 void Editor::draw(SDL_Renderer* renderer) {
+    drawRenderer_ = renderer;
     paintMap(renderer);
     const ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -2153,6 +2183,7 @@ void Editor::draw(SDL_Renderer* renderer) {
     ImGui::EndChild();
     ImGui::End();
     drawBlockEditor();
+    drawSelfTest();
 
         if (!io.WantTextInput) {
         if (ImGui::IsKeyPressed(ImGuiKey_F6)) buildGame();
@@ -2404,6 +2435,23 @@ void Editor::addStage(bool duplicate) {
         project_.stages.push_back(stage);
     }
     stageIndex_ = static_cast<int>(project_.stages.size()) - 1;
+}
+
+void Editor::deleteCurrentStage() {
+    if (project_.stages.size() <= 1) {
+        status_ = "Keep at least one stage.";
+        return;
+    }
+    project_.stages.erase(project_.stages.begin() + stageIndex_);
+    stageIndex_ = std::min(stageIndex_, static_cast<int>(project_.stages.size()) - 1);
+    selectedPlacement_ = -1;
+}
+
+void Editor::resizeCurrentStage(int width, int height) {
+    Stage* stage = currentStage();
+    if (!stage) return;
+    pushUndo();
+    stage->resize(std::clamp(width, 5, 200), std::clamp(height, 5, 200));
 }
 
 }  // namespace cc

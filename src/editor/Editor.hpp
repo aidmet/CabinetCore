@@ -20,7 +20,15 @@ public:
     bool openProject(const std::string& path, std::string& err);
     void dropFile(const std::string& path);
     void draw(SDL_Renderer* renderer);
+    struct SelfCheck {
+        std::string name;
+        bool pass = false;
+        std::string detail;
+    };
+
     bool playing() const { return playing_; }
+    int runSelfTest(SDL_Renderer* renderer = nullptr);
+    const std::vector<SelfCheck>& selfChecks() const { return selfChecks_; }
     void togglePlay();
     void updatePlay(float dt, const Input& input);
     void renderPlay();
@@ -85,6 +93,17 @@ private:
     std::string pickFile(bool save, const char* filter);
     void addActor(ActorKind kind);
     void addStage(bool duplicate);
+    void deleteCurrentStage();
+    void resizeCurrentStage(int width, int height);
+    void insertBlock(BlockKind kind);
+    void applyBlockEdit();
+    void normalizeSprite(Sprite& sprite);
+    void plotSprite(Sprite& sprite, int frame, int x, int y, bool erase);
+    void floodSprite(Sprite& sprite, int frame, int x, int y, bool erase);
+    void strokeSprite(Sprite& sprite, int frame, int x0, int y0, int x1, int y1, bool erase);
+    void copySpriteFrame(Sprite& sprite, int frame);
+    void pickSprite(Sprite& sprite, int frame, int x, int y);
+    void drawSelfTest();
     Tileset* tileset();
     Sprite* selectedSprite();
 
@@ -104,6 +123,9 @@ private:
     std::vector<std::string> levelNotes_;
     bool levelChecked_ = false;
     bool showCollision_ = false;
+    std::vector<SelfCheck> selfChecks_;
+    bool selfTestOpen_ = false;
+    SDL_Renderer* drawRenderer_ = nullptr;
     SDL_Texture* mapTex_ = nullptr;
     SDL_Texture* tilesetTex_ = nullptr;
     int tilesetTexW_ = 0;

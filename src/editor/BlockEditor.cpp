@@ -166,6 +166,76 @@ void acceptDrop(Drop& drop, int script, const std::vector<int>& path, bool insid
 
 }  // namespace
 
+void Editor::insertBlock(BlockKind kind) {
+    if (blockActor_ < 0 || blockActor_ >= static_cast<int>(project_.actors.size())) return;
+    ActorDef& actor = project_.actors[static_cast<size_t>(blockActor_)];
+    Block block = makeBlock(kind);
+    if (block.name.empty() && (kind == BlockKind::SetProp || kind == BlockKind::ChangeProp) && !actor.props.empty())
+        block.name = actor.props[0].name;
+    if (kind == BlockKind::SpawnActor && block.name.empty()) {
+        for (const auto& other : project_.actors) {
+            if (other.kind == ActorKind::Hero) continue;
+            block.name = other.id;
+            break;
+        }
+    }
+    if (isHat(kind)) {
+        Script script;
+        script.hat = block;
+        actor.scripts.push_back(std::move(script));
+        blockScript_ = static_cast<int>(actor.scripts.size()) - 1;
+        blockPath_.clear();
+        return;
+    }
+    if (actor.scripts.empty()) {
+        Script script;
+        script.hat.kind = BlockKind::EveryFrame;
+        actor.scripts.push_back(std::move(script));
+        blockScript_ = 0;
+    }
+    if (blockScript_ < 0 || blockScript_ >= static_cast<int>(actor.scripts.size())) blockScript_ = 0;
+    FoundBlock found = findBlock(actor, blockScript_, blockPath_);
+    if (found.list && (found.list->at(static_cast<size_t>(found.index)).kind == BlockKind::If ||
+                       found.list->at(static_cast<size_t>(found.index)).kind == BlockKind::Repeat)) {
+        Block& parent = found.list->at(static_cast<size_t>(found.index));
+        parent.inner.push_back(std::move(block));
+        blockPath_.push_back(static_cast<int>(parent.inner.size()) - 1);
+        return;
+    }
+    if (found.list) {
+        const int at = found.index + 1;
+        found.list->insert(found.list->begin() + at, std::move(block));
+        blockPath_.back() = at;
+        return;
+    }
+    Script& script = actor.scripts[static_cast<size_t>(blockScript_)];
+    script.body.push_back(std::move(block));
+    blockPath_ = {static_cast<int>(script.body.size()) - 1};
+}
+
+void Editor::applyBlockEdit() {
+    if (blockEdit_ == 0) return;
+    if (blockActor_ < 0 || blockActor_ >= static_cast<int>(project_.actors.size())) {
+        blockEdit_ = 0;
+        return;
+    }
+    ActorDef& actor = project_.actors[static_cast<size_t>(blockActor_)];
+    FoundBlock found = findBlock(actor, blockScript_, blockPath_);
+    if (found.list && found.index >= 0 && found.index < static_cast<int>(found.list->size())) {
+        if (blockEdit_ == 1) {
+            found.list->erase(found.list->begin() + found.index);
+            blockPath_.clear();
+        } else if (blockEdit_ == 2 && found.index > 0) {
+            std::swap(found.list->at(static_cast<size_t>(found.index)), found.list->at(static_cast<size_t>(found.index - 1)));
+            blockPath_.back() = found.index - 1;
+        } else if (blockEdit_ == 3 && found.index + 1 < static_cast<int>(found.list->size())) {
+            std::swap(found.list->at(static_cast<size_t>(found.index)), found.list->at(static_cast<size_t>(found.index + 1)));
+            blockPath_.back() = found.index + 1;
+        }
+    }
+    blockEdit_ = 0;
+}
+
 void Editor::drawBlockEditor() {
     if (!blocksOpen_) return;
     if (blockActor_ < 0 || blockActor_ >= static_cast<int>(project_.actors.size())) {
@@ -189,50 +259,7 @@ void Editor::drawBlockEditor() {
     }
 
     Drop drop;
-    auto addKind = [&](BlockKind kind) {
-        Block block = makeBlock(kind);
-        if (block.name.empty() && (kind == BlockKind::SetProp || kind == BlockKind::ChangeProp) && !actor.props.empty())
-            block.name = actor.props[0].name;
-        if (kind == BlockKind::SpawnActor && block.name.empty()) {
-            for (const auto& other : project_.actors) {
-                if (other.kind == ActorKind::Hero) continue;
-                block.name = other.id;
-                break;
-            }
-        }
-        if (isHat(kind)) {
-            Script script;
-            script.hat = block;
-            actor.scripts.push_back(std::move(script));
-            blockScript_ = static_cast<int>(actor.scripts.size()) - 1;
-            blockPath_.clear();
-            return;
-        }
-        if (actor.scripts.empty()) {
-            Script script;
-            script.hat.kind = BlockKind::EveryFrame;
-            actor.scripts.push_back(std::move(script));
-            blockScript_ = 0;
-        }
-        if (blockScript_ < 0 || blockScript_ >= static_cast<int>(actor.scripts.size())) blockScript_ = 0;
-        FoundBlock found = findBlock(actor, blockScript_, blockPath_);
-        if (found.list && (found.list->at(static_cast<size_t>(found.index)).kind == BlockKind::If ||
-                           found.list->at(static_cast<size_t>(found.index)).kind == BlockKind::Repeat)) {
-            Block& parent = found.list->at(static_cast<size_t>(found.index));
-            parent.inner.push_back(std::move(block));
-            blockPath_.push_back(static_cast<int>(parent.inner.size()) - 1);
-            return;
-        }
-        if (found.list) {
-            const int at = found.index + 1;
-            found.list->insert(found.list->begin() + at, std::move(block));
-            blockPath_.back() = at;
-            return;
-        }
-        Script& script = actor.scripts[static_cast<size_t>(blockScript_)];
-        script.body.push_back(std::move(block));
-        blockPath_ = {static_cast<int>(script.body.size()) - 1};
-    };
+    auto addKind = [&](BlockKind kind) { insertBlock(kind); };
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
@@ -606,24 +633,7 @@ void Editor::drawBlockEditor() {
         }
     }
 
-    if (blockEdit_ != 0) {
-        FoundBlock found = findBlock(actor, blockScript_, blockPath_);
-        if (found.list && found.index >= 0 && found.index < static_cast<int>(found.list->size())) {
-            if (blockEdit_ == 1) {
-                found.list->erase(found.list->begin() + found.index);
-                blockPath_.clear();
-            } else if (blockEdit_ == 2 && found.index > 0) {
-                std::swap(found.list->at(static_cast<size_t>(found.index)),
-                          found.list->at(static_cast<size_t>(found.index - 1)));
-                blockPath_.back() = found.index - 1;
-            } else if (blockEdit_ == 3 && found.index + 1 < static_cast<int>(found.list->size())) {
-                std::swap(found.list->at(static_cast<size_t>(found.index)),
-                          found.list->at(static_cast<size_t>(found.index + 1)));
-                blockPath_.back() = found.index + 1;
-            }
-        }
-        blockEdit_ = 0;
-    }
+    applyBlockEdit();
 
     ImGui::End();
 }
