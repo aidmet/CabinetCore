@@ -29,6 +29,7 @@ public:
     int hp() const { return hp_; }
     int stageIndex() const { return stageIndex_; }
     int specialAmmo() const { return specialAmmo_; }
+    int credits() const { return credits_; }
     int debugTile(int tx, int ty) const;
     float playerX() const { return px_; }
     float playerY() const { return py_; }
@@ -112,6 +113,7 @@ private:
     const Tileset* tileset() const;
     void loadStage();
     void beginGame();
+    void insertCoin();
     void goNext();
     void completeStage();
     void endGame(bool victory);
@@ -235,6 +237,7 @@ private:
     int playerFrame_ = -1;
     int stageRequest_ = -1;
     int specialAmmo_ = 0;
+    int credits_ = 0;
     int rideIndex_ = -1;
     bool stageRequestSet_ = false;
     std::vector<PendingSpawn> pendingSpawns_;

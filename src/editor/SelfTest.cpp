@@ -1217,6 +1217,20 @@ int Editor::runSelfTest(SDL_Renderer* renderer, int which) {
                 engine_.update(1.f / 60.f, climb);
             }
             expect("Holding up climbs a ladder", engine_.playerY() < ladderY - 8.f, "");
+
+            fresh();
+            project_.settings.freePlay = false;
+            engine_.start(project_, 0, {}, false);
+            Input blocked;
+            blocked.startEdge = true;
+            engine_.update(1.f / 60.f, blocked);
+            expect("Start waits until a credit is in", engine_.phase() == Phase::Title && engine_.credits() == 0, "");
+            Input coin;
+            coin.coinEdge = true;
+            engine_.update(1.f / 60.f, coin);
+            expect("The coin switch adds a credit", engine_.credits() == 1, "");
+            engine_.update(1.f / 60.f, blocked);
+            expect("Start spends one credit and begins the game", engine_.phase() == Phase::Playing && engine_.credits() == 0, "");
         }
 
         if (which < 0 || which == 2) {

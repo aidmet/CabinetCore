@@ -46,7 +46,7 @@ void applyStyle() {
 }
 
 cc::Input pollPlay(const Uint8* keys, SDL_GameController* pad, bool& prevJump, bool& prevShoot, bool& prevStart,
-                   bool& prevPause, bool& prevQuit, bool& prevRestart) {
+                   bool& prevPause, bool& prevQuit, bool& prevRestart, bool& prevCoin) {
     cc::Input input;
     if (keys[SDL_SCANCODE_LEFT] || keys[SDL_SCANCODE_A]) input.axisX -= 1.f;
     if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D]) input.axisX += 1.f;
@@ -58,6 +58,7 @@ cc::Input pollPlay(const Uint8* keys, SDL_GameController* pad, bool& prevJump, b
     bool pause = keys[SDL_SCANCODE_ESCAPE];
     const bool quit = keys[SDL_SCANCODE_Q];
     const bool restart = keys[SDL_SCANCODE_R];
+    const bool coin = keys[SDL_SCANCODE_5];
     if (pad) {
         const int ax = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
         const int ay = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
@@ -83,12 +84,14 @@ cc::Input pollPlay(const Uint8* keys, SDL_GameController* pad, bool& prevJump, b
     input.pauseEdge = pause && !prevPause;
     input.quitEdge = quit && !prevQuit;
     input.restartEdge = restart && !prevRestart;
+    input.coinEdge = coin && !prevCoin;
     prevJump = jump;
     prevShoot = shoot;
     prevStart = start;
     prevPause = pause;
     prevQuit = quit;
     prevRestart = restart;
+    prevCoin = coin;
     return input;
 }
 
@@ -224,7 +227,8 @@ int main(int argc, char** argv) {
     }
     bool prevF5 = false;
     bool prevF3 = false;
-    bool prevJump = false, prevShoot = false, prevStart = false, prevPause = false, prevQuit = false, prevRestart = false;
+    bool prevJump = false, prevShoot = false, prevStart = false, prevPause = false, prevQuit = false, prevRestart = false,
+         prevCoin = false;
     bool running = true;
     int frames = 0;
     uint64_t last = SDL_GetPerformanceCounter();
@@ -264,7 +268,7 @@ int main(int argc, char** argv) {
         if (editor.playing()) {
             while (acc >= 1.0 / 60.0) {
                 editor.updatePlay(1.f / 60.f,
-                                  pollPlay(keys, pad, prevJump, prevShoot, prevStart, prevPause, prevQuit, prevRestart));
+                                  pollPlay(keys, pad, prevJump, prevShoot, prevStart, prevPause, prevQuit, prevRestart, prevCoin));
                 acc -= 1.0 / 60.0;
             }
             editor.renderPlay();

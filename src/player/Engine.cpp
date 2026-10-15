@@ -41,6 +41,7 @@ void Engine::start(const Project& project, int stageIndex, const std::string& sc
     specialId_.clear();
     chargeHold_ = 0.f;
     rideIndex_ = -1;
+    credits_ = 0;
     phase_ = Phase::Title;
     stageRequestSet_ = false;
     pendingSpawns_.clear();
@@ -114,6 +115,12 @@ void Engine::saveScores() {
     if (!out) return;
     out << "CCSCORE1\n";
     for (const auto& row : board_) out << row.name << ' ' << row.score << '\n';
+}
+
+void Engine::insertCoin() {
+    if (!proj_ || proj_->settings.freePlay) return;
+    credits_ = std::min(99, credits_ + 1);
+    sfx("coin");
 }
 
 void Engine::beginGame() {
@@ -285,9 +292,17 @@ void Engine::update(float dt, const Input& input) {
     invuln_ = std::max(0.f, invuln_ - dt);
     frightened_ = std::max(0.f, frightened_ - dt);
 
+    if (input.coinEdge) insertCoin();
+
     switch (phase_) {
         case Phase::Title:
-            if (input.startEdge) beginGame();
+            if (input.startEdge) {
+                const bool free = !proj_ || proj_->settings.freePlay;
+                if (free || credits_ > 0) {
+                    if (!free) credits_ = std::max(0, credits_ - 1);
+                    beginGame();
+                }
+            }
             if (input.quitEdge) quit_ = true;
             return;
         case Phase::Paused:
@@ -2131,6 +2146,12 @@ void Engine::drawHud() {
         canvas_.fillRect(4 + i * 8, 12, 6, 5, on ? 230 : 50, on ? 60 : 40, on ? 80 : 50);
     }
     if (hasKey_) canvas_.text(4 + hearts * 8 + 4, 11, "KEY", 255, 220, 80, 1);
+    if (proj_ && !proj_->settings.freePlay) {
+        std::snprintf(line, sizeof(line), "CREDIT %d", credits_);
+        const int cy = canvas_.height() - 20;
+        canvas_.text(5, cy + 1, line, 0, 0, 0, 1);
+        canvas_.text(4, cy, line, 255, 236, 140, 1);
+    }
     if (specialAmmo_ > 0) {
         std::snprintf(line, sizeof(line), "S%d", specialAmmo_);
         const int sx = 4 + hearts * 8 + (hasKey_ ? 28 : 4);
@@ -2171,7 +2192,14 @@ void Engine::drawOverlay() {
     if (phase_ == Phase::Title && proj_) {
         canvas_.shade(40);
         center(proj_->settings.title, 48, 255, 214, 90, 2);
-        if (static_cast<int>(time_ * 2) % 2 == 0) center("PRESS START", 100, 255, 255, 255, 1);
+        const bool free = proj_->settings.freePlay;
+        if (!free) {
+            char credit[32];
+            std::snprintf(credit, sizeof(credit), "CREDIT %d", credits_);
+            center(credit, 84, 255, 236, 140, 1);
+        }
+        if (static_cast<int>(time_ * 2) % 2 == 0)
+            center(free || credits_ > 0 ? "PRESS START" : "INSERT COIN", 100, 255, 255, 255, 1);
         char best[64];
         std::snprintf(best, sizeof(best), "TOP %s %06d", board_[0].name, board_[0].score);
         center(best, 130, 180, 220, 255, 1);

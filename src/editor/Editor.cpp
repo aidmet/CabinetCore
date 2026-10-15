@@ -211,6 +211,7 @@ uint32_t projectHash(const Project& project) {
     hash = mixHash(hash, static_cast<uint32_t>(project.settings.maxHealth));
     hash = mixHash(hash, project.settings.crt ? 1u : 0u);
     hash = mixHash(hash, project.settings.screenShake ? 1u : 0u);
+    hash = mixHash(hash, project.settings.freePlay ? 1u : 0u);
     hash = mixHash(hash, static_cast<uint32_t>(project.nextUid));
     for (const auto& stage : project.stages) {
         hash = mixText(hash, stage.id);
@@ -1738,6 +1739,9 @@ void Editor::drawLeft() {
             project_.settings.scale = std::clamp(project_.settings.scale, 1, 6);
             ImGui::Checkbox("CRT scanlines", &project_.settings.crt);
             ImGui::Checkbox("Screen shake", &project_.settings.screenShake);
+            ImGui::Checkbox("Free play", &project_.settings.freePlay);
+            ImGui::TextWrapped(
+                "Free play begins when Start is pressed. Turn it off for a cabinet. The coin switch is the 5 key and adds a credit. Start begins a game only while a credit is waiting.");
             editString("Start stage id", project_.settings.startStage);
             title_ = "CabinetCore — " + project_.settings.title;
             ImGui::EndTabItem();

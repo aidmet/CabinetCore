@@ -10,7 +10,7 @@ namespace cc {
 namespace {
 
 constexpr char kMagic[8] = {'C', 'C', 'O', 'R', 'E', 'D', 'A', 'T'};
-constexpr uint32_t kVersion = 3;
+constexpr uint32_t kVersion = 4;
 
 void writeBlock(ByteWriter& w, const Block& block) {
     w.u32(static_cast<uint32_t>(block.kind));
@@ -224,6 +224,7 @@ bool Project::save(const std::string& path, std::string& err) const {
     w.boolean(settings.crt);
     w.boolean(settings.screenShake);
     w.str(settings.startStage);
+    w.boolean(settings.freePlay);
     w.i32(nextUid);
 
     w.u32(static_cast<uint32_t>(sprites.size()));
@@ -387,6 +388,7 @@ bool Project::load(const std::string& path, Project& project, std::string& err) 
     loaded.settings.crt = r.boolean();
     loaded.settings.screenShake = r.boolean();
     loaded.settings.startStage = r.str();
+    if (version >= 4) loaded.settings.freePlay = r.boolean();
     loaded.nextUid = r.i32();
 
     const uint32_t spriteCount = r.u32();

@@ -160,6 +160,7 @@ struct Input {
     bool pauseEdge = false;
     bool quitEdge = false;
     bool restartEdge = false;
+    bool coinEdge = false;
 };
 
 struct Behavior {
@@ -286,6 +287,7 @@ struct Settings {
     int maxHealth = 3;
     bool crt = true;
     bool screenShake = true;
+    bool freePlay = true;
     std::string startStage;
 };
 

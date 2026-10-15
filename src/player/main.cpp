@@ -47,6 +47,12 @@ int selfTest(const std::string& playerPath) {
         return fail("Crumble tiles did not round-trip");
     if (loaded.stages.size() != demo.stages.size()) return fail("Stage count did not round-trip");
     if (loaded.sprites.empty() || loaded.sounds.empty() || loaded.actors.empty()) return fail("Assets missing after load");
+    if (!loaded.settings.freePlay) return fail("Free play did not round-trip");
+    cc::Project coinGame = demo;
+    coinGame.settings.freePlay = false;
+    if (!coinGame.save(roundtrip, err)) return fail(err);
+    cc::Project coinLoaded;
+    if (!cc::Project::load(roundtrip, coinLoaded, err) || coinLoaded.settings.freePlay) return fail("Coin mode did not round-trip");
     if (!demo.validate().empty()) return fail(demo.validate());
 
     cc::Engine title;
@@ -299,6 +305,23 @@ int selfTest(const std::string& playerPath) {
     if (!cc::exportGame(demo, outDir, playerPath, err)) return fail(err);
     if (!std::filesystem::exists(outDir + "/game.dat")) return fail("game.dat was not written");
     if (!std::filesystem::exists(outDir + "/cabinet.elf")) return fail("cabinet.elf was not written");
+
+    cc::Project paid = demo;
+    paid.settings.freePlay = false;
+    cc::Engine cabinet;
+    cabinet.start(paid);
+    cc::Input blocked;
+    blocked.startEdge = true;
+    cabinet.update(1.f / 60.f, blocked);
+    if (cabinet.phase() != cc::Phase::Title || cabinet.credits() != 0) return fail("Start began a game with no credit");
+    cc::Input coin;
+    coin.coinEdge = true;
+    cabinet.update(1.f / 60.f, coin);
+    if (cabinet.credits() != 1) return fail("A coin did not add a credit");
+    cabinet.update(1.f / 60.f, blocked);
+    if (cabinet.phase() != cc::Phase::Playing || cabinet.credits() != 0) return fail("Start did not spend a credit");
+    cabinet.update(1.f / 60.f, coin);
+    if (cabinet.credits() != 1) return fail("A coin during play did not add a credit");
     std::cout << "selftest ok\n";
     return 0;
 }
@@ -310,6 +333,7 @@ struct KeyEdge {
     bool pause = false;
     bool quit = false;
     bool restart = false;
+    bool coin = false;
 };
 
 cc::Input pollInput(const Uint8* keys, SDL_GameController* pad, KeyEdge& prev) {
@@ -328,6 +352,7 @@ cc::Input pollInput(const Uint8* keys, SDL_GameController* pad, KeyEdge& prev) {
     bool pause = keys[SDL_SCANCODE_ESCAPE];
     bool quit = keys[SDL_SCANCODE_Q];
     bool restart = keys[SDL_SCANCODE_R];
+    bool coin = keys[SDL_SCANCODE_5];
     if (pad) {
         const int ax = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
         const int ay = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
@@ -353,7 +378,8 @@ cc::Input pollInput(const Uint8* keys, SDL_GameController* pad, KeyEdge& prev) {
     input.pauseEdge = pause && !prev.pause;
     input.quitEdge = quit && !prev.quit;
     input.restartEdge = restart && !prev.restart;
-    prev = {jump, shoot, start, pause, quit, restart};
+    input.coinEdge = coin && !prev.coin;
+    prev = {jump, shoot, start, pause, quit, restart, coin};
     return input;
 }
 
