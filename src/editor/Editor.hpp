@@ -186,6 +186,8 @@ private:
     int stageIndex_ = 0;
     int tool_ = 1;
     int layer_ = 1;
+    int leftPage_ = 0;
+    int inspectPage_ = 0;
     int zoom_ = 2;
     int selectedTile_ = 1;
     int selectedPlacement_ = -1;

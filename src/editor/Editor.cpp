@@ -97,6 +97,20 @@ bool editInt(const char* label, int& value) {
     return ImGui::InputInt(id.c_str(), &value);
 }
 
+int pageButtons(const char* const* names, int count, int current) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float regionRight = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+    for (int i = 0; i < count; ++i) {
+        const float width = ImGui::CalcTextSize(names[i]).x + style.FramePadding.x * 2.f;
+        if (i > 0 && ImGui::GetItemRectMax().x + style.ItemSpacing.x + width < regionRight) ImGui::SameLine();
+        const bool on = current == i;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.30f, 0.12f, 1.f));
+        if (ImGui::Button(names[i])) current = i;
+        if (on) ImGui::PopStyleColor();
+    }
+    return current;
+}
+
 std::string uniqueId(const Project& project, const std::string& base) {
     auto taken = [&](const std::string& id) {
         if (project.findActor(id) || project.findSprite(id) || project.findTileset(id) || project.findSound(id)) return true;
@@ -1735,8 +1749,10 @@ void Editor::drawBuildTab() {
 }
 
 void Editor::drawLeft() {
-    if (ImGui::BeginTabBar("left", ImGuiTabBarFlags_FittingPolicyScroll)) {
-        if (ImGui::BeginTabItem("Stages")) {
+    const char* pages[] = {"Stages", "Tiles", "Actors", "Sprites", "Sounds", "Build", "Game"};
+    leftPage_ = pageButtons(pages, 7, leftPage_);
+    ImGui::Separator();
+    if (leftPage_ == 0) {
             for (int i = 0; i < static_cast<int>(project_.stages.size()); ++i) {
                 const std::string label = project_.stages[i].name + "##st" + std::to_string(i);
                 if (ImGui::Selectable(label.c_str(), stageIndex_ == i)) {
@@ -1749,9 +1765,8 @@ void Editor::drawLeft() {
             if (ImGui::Button("Duplicate")) addStage(true);
             ImGui::SameLine();
             if (ImGui::Button("Delete")) deleteCurrentStage();
-            ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Tiles")) {
+        if (leftPage_ == 1) {
             const Tileset* set = tileset();
             const int tileW = set ? set->tileW : 16;
             const int tileH = set ? set->tileH : 16;
@@ -1774,6 +1789,7 @@ void Editor::drawLeft() {
                                            uv1, ImVec4(0.08f, 0.08f, 0.12f, 1.f))) {
                         selectedTile_ = i;
                         paintTarget_ = 1;
+                        inspectPage_ = 1;
                     }
                     if (on) ImGui::PopStyleColor();
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tile %d", i);
@@ -1782,12 +1798,12 @@ void Editor::drawLeft() {
                 if (ImGui::Selectable(("Tile " + std::to_string(i)).c_str(), on)) {
                     selectedTile_ = i;
                     paintTarget_ = 1;
+                    inspectPage_ = 1;
                 }
                 ImGui::PopID();
             }
-            ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Actors")) {
+        if (leftPage_ == 2) {
             for (int i = 0; i < static_cast<int>(project_.actors.size()); ++i) {
                 const std::string label = project_.actors[i].name + "  " + kindName(project_.actors[i].kind);
                 if (ImGui::Selectable((label + "##a" + std::to_string(i)).c_str(), selectedActor_ == i)) selectedActor_ = i;
@@ -1800,9 +1816,8 @@ void Editor::drawLeft() {
             if (ImGui::Button("Check")) addActor(ActorKind::Check);
             ImGui::SameLine();
             if (ImGui::Button("Boss")) addActor(ActorKind::Boss);
-            ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Sprites")) {
+        if (leftPage_ == 3) {
             for (int i = 0; i < static_cast<int>(project_.sprites.size()); ++i) {
                 if (ImGui::Selectable((project_.sprites[i].name + "##sp" + std::to_string(i)).c_str(), selectedSprite_ == i)) {
                     selectedSprite_ = i;
@@ -1824,9 +1839,8 @@ void Editor::drawLeft() {
             }
             ImGui::SameLine();
             if (ImGui::Button("Import PNG")) openFilePick(FilePick::ImportPng);
-            ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Sounds")) {
+        if (leftPage_ == 4) {
             for (int i = 0; i < static_cast<int>(project_.sounds.size()); ++i) {
                 const std::string label = project_.sounds[i].name + (project_.sounds[i].music ? "  (music)" : "");
                 if (ImGui::Selectable((label + "##so" + std::to_string(i)).c_str(), selectedSound_ == i)) selectedSound_ = i;
@@ -1880,13 +1894,11 @@ void Editor::drawLeft() {
             ImGui::SameLine();
             if (ImGui::Button("Coin", ImVec2(70.f, 0))) replaceSound(synthCoin());
             ImGui::TextWrapped("Jump, Shoot, and Coin replace the sounds the game already plays. Make sound adds a new one.");
-            ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Build")) {
+        if (leftPage_ == 5) {
             drawBuildTab();
-            ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Game")) {
+        if (leftPage_ == 6) {
             editString("Title", project_.settings.title);
             editString("Author", project_.settings.author);
             editInt("View width", project_.settings.viewW);
@@ -1904,10 +1916,7 @@ void Editor::drawLeft() {
                 "Free play begins when Start is pressed. Turn it off for a cabinet. The coin switch is the 5 key and adds a credit. Start begins a game only while a credit is waiting.");
             editString("Start stage id", project_.settings.startStage);
             title_ = "CabinetCore — " + project_.settings.title;
-            ImGui::EndTabItem();
         }
-        ImGui::EndTabBar();
-    }
 }
 
 void Editor::drawCanvas() {
@@ -1950,6 +1959,7 @@ void Editor::drawCanvas() {
             }
             const ActorDef* actor = project_.findActor(id);
             status_ = std::string("Selected ") + (actor ? actor->name : id);
+            inspectPage_ = 2;
         } else if (genDrag_ != 0) {
             if (click) {
                 genDown_ = true;
@@ -1983,6 +1993,7 @@ void Editor::drawCanvas() {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             selectedTile_ = stage->get(activeLayer(), tx, ty);
             status_ = "Picked tile " + std::to_string(selectedTile_);
+            inspectPage_ = 1;
         }
         if (tool_ == 0 && selectedPlacement_ >= 0 && down && !click &&
             selectedPlacement_ < static_cast<int>(stage->placements.size())) {
@@ -2038,7 +2049,7 @@ void Editor::drawStageSettings(Stage& stage) {
     ImGui::Separator();
     editInt("Width", newW);
     editInt("Height", newH);
-    if (ImGui::Button("Resize stage", ImVec2(-FLT_MIN, 0))) resizeCurrentStage(newW, newH);
+    if (ImGui::Button("Resize stage", ImVec2(-1.f, 0))) resizeCurrentStage(newW, newH);
 }
 
 void Editor::drawActorEditor(ActorDef& actor) {
@@ -2118,14 +2129,16 @@ void Editor::drawTileFlags() {
         }
     };
     ImGui::Text("Tile %d", selectedTile_);
-    flag("Solid", TileSolid);
-    flag("One-way", TileOneWay);
-    flag("Ladder", TileLadder);
-    flag("Hazard", TileHazard);
-    flag("Water", TileWater);
-    flag("Ice", TileIce);
-    flag("Destructible", TileDestructible);
-    flag("Crumble", TileCrumble);
+    const float mid = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x * 0.5f;
+    auto pair = [&](const char* left, uint32_t leftBit, const char* right, uint32_t rightBit) {
+        flag(left, leftBit);
+        ImGui::SameLine(mid);
+        flag(right, rightBit);
+    };
+    pair("Solid", TileSolid, "One-way", TileOneWay);
+    pair("Ladder", TileLadder, "Hazard", TileHazard);
+    pair("Water", TileWater, "Ice", TileIce);
+    pair("Destructible", TileDestructible, "Crumble", TileCrumble);
     editInt("Anim frames", tile.frames);
     editFloat("Anim fps", tile.fps);
 }
@@ -2133,49 +2146,51 @@ void Editor::drawTileFlags() {
 void Editor::drawInspector() {
     Stage* stage = currentStage();
     if (!stage) return;
-    if (ImGui::CollapsingHeader("Stage", ImGuiTreeNodeFlags_DefaultOpen)) {
+    const char* pages[] = {"Stage", "Tile", "Actor"};
+    inspectPage_ = pageButtons(pages, 3, inspectPage_);
+    ImGui::Separator();
+    if (inspectPage_ == 0) {
         ImGui::PushID("stage");
         drawStageSettings(*stage);
         ImGui::PopID();
+        return;
     }
-    if (ImGui::CollapsingHeader("Tile", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (inspectPage_ == 1) {
         ImGui::PushID("tile");
         drawTileFlags();
         ImGui::PopID();
+        return;
     }
     if (selectedPlacement_ >= 0 && selectedPlacement_ < static_cast<int>(stage->placements.size())) {
-        if (ImGui::CollapsingHeader("Placed actor", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::PushID("placed");
-            Placement& placement = stage->placements[selectedPlacement_];
-            const Tileset* set = tileset();
-            const int tileW = set && set->tileW > 0 ? set->tileW : 16;
-            const int tileH = set && set->tileH > 0 ? set->tileH : 16;
-            float x = placement.x;
-            float y = placement.y;
-            if (editFloat("X", x)) placement.x = snapCoord(x, tileW);
-            if (editFloat("Y", y)) placement.y = snapCoord(y, tileH);
-            beginField("Actor");
-            if (ImGui::BeginCombo("##placed-actor", placement.actorId.c_str())) {
-                for (const auto& actor : project_.actors) {
-                    if (ImGui::Selectable((actor.name + "##" + actor.id).c_str(), actor.id == placement.actorId))
-                        placement.actorId = actor.id;
-                }
-                ImGui::EndCombo();
+        ImGui::PushID("placed");
+        Placement& placement = stage->placements[selectedPlacement_];
+        const Tileset* set = tileset();
+        const int tileW = set && set->tileW > 0 ? set->tileW : 16;
+        const int tileH = set && set->tileH > 0 ? set->tileH : 16;
+        float x = placement.x;
+        float y = placement.y;
+        if (editFloat("X", x)) placement.x = snapCoord(x, tileW);
+        if (editFloat("Y", y)) placement.y = snapCoord(y, tileH);
+        beginField("Actor");
+        if (ImGui::BeginCombo("##placed-actor", placement.actorId.c_str())) {
+            for (const auto& actor : project_.actors) {
+                if (ImGui::Selectable((actor.name + "##" + actor.id).c_str(), actor.id == placement.actorId))
+                    placement.actorId = actor.id;
             }
-            if (ImGui::Button("Remove from stage")) {
-                pushUndo();
-                stage->placements.erase(stage->placements.begin() + selectedPlacement_);
-                selectedPlacement_ = -1;
-            }
-            ImGui::PopID();
+            ImGui::EndCombo();
         }
+        if (ImGui::Button("Remove from stage", ImVec2(-1.f, 0))) {
+            pushUndo();
+            stage->placements.erase(stage->placements.begin() + selectedPlacement_);
+            selectedPlacement_ = -1;
+        }
+        ImGui::PopID();
+        ImGui::Separator();
     }
     if (selectedActor_ >= 0 && selectedActor_ < static_cast<int>(project_.actors.size())) {
-        if (ImGui::CollapsingHeader("Behavior", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::PushID("actor");
-            drawActorEditor(project_.actors[selectedActor_]);
-            ImGui::PopID();
-        }
+        ImGui::PushID("actor");
+        drawActorEditor(project_.actors[selectedActor_]);
+        ImGui::PopID();
     }
 }
 
@@ -2599,6 +2614,7 @@ void Editor::drawSheetPainter(std::vector<uint8_t>& rgba, int imgW, int ox, int 
     }
     ImGui::SameLine();
     if (ImGui::Button("Erase")) colorIndex_ = -1;
+    ImGui::NewLine();
     const int scale = std::clamp(paintZoom_, 4, 32);
     auto indexOf = [&](int x, int y) -> size_t { return (static_cast<size_t>(oy + y) * imgW + ox + x) * 4; };
     ImGui::BeginChild("pixels", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
@@ -2673,19 +2689,22 @@ void Editor::drawBottom() {
         const int index = selectedTile_ - 1;
         const int col = index % columns;
         const int row = index / columns;
-        ImGui::Text("Tile painter — tile %d. This picture is shared everywhere the tile is used.", selectedTile_);
+        if (sprite) ImGui::SameLine();
+        ImGui::Text("Tile %d", selectedTile_);
+        ImGui::NewLine();
         drawSheetPainter(set->rgba, set->imgW, col * set->tileW, row * set->tileH, set->tileW, set->tileH);
         return;
     }
     if (!sprite) return;
+    if (tileOk) ImGui::SameLine();
     ImGui::Text("Pixel painter — %s", sprite->name.c_str());
-    ImGui::SetNextItemWidth(72);
+    ImGui::SetNextItemWidth(72.f);
     ImGui::InputInt("Frame w", &sprite->frameW);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(72);
+    ImGui::SetNextItemWidth(72.f);
     ImGui::InputInt("Frame h", &sprite->frameH);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(72);
+    ImGui::SetNextItemWidth(72.f);
     ImGui::InputInt("Frames", &sprite->frames);
     normalizeSprite(*sprite);
     spriteFrame_ = std::clamp(spriteFrame_, 0, sprite->frames - 1);
@@ -2694,6 +2713,7 @@ void Editor::drawBottom() {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(72);
     ImGui::InputFloat("FPS", &sprite->fps);
+    ImGui::NewLine();
     if (spriteFrame_ > 0 && ImGui::Button("Copy previous frame")) copySpriteFrame(*sprite, spriteFrame_);
     drawSheetPainter(sprite->rgba, sprite->imgW, spriteFrame_ * sprite->frameW, 0, sprite->frameW, sprite->frameH);
 }
@@ -2752,7 +2772,9 @@ void Editor::draw(SDL_Renderer* renderer) {
     ImGui::BeginChild("left", ImVec2(shownLeft, topH), true);
     uiLeftW_ = ImGui::GetWindowWidth();
     uiLeftH_ = ImGui::GetWindowHeight();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.f, 5.f));
     drawLeft();
+    ImGui::PopStyleVar();
     ImGui::EndChild();
     ImGui::SameLine(0.f, 0.f);
     {
@@ -2766,7 +2788,9 @@ void Editor::draw(SDL_Renderer* renderer) {
     ImGui::BeginChild("canvas", ImVec2(canvasW, topH), true, ImGuiWindowFlags_HorizontalScrollbar);
     uiCanvasW_ = ImGui::GetWindowWidth();
     uiCanvasH_ = ImGui::GetWindowHeight();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.f, 5.f));
     drawCanvas();
+    ImGui::PopStyleVar();
     ImGui::EndChild();
     ImGui::SameLine(0.f, 0.f);
     {
@@ -2780,7 +2804,9 @@ void Editor::draw(SDL_Renderer* renderer) {
     ImGui::SameLine(0.f, 0.f);
     ImGui::BeginChild("inspector", ImVec2(shownInspector, topH), true);
     uiInspectorW_ = ImGui::GetWindowWidth();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.f, 5.f));
     drawInspector();
+    ImGui::PopStyleVar();
     ImGui::EndChild();
     {
         float bottomSize = shownBottom;
@@ -2796,7 +2822,9 @@ void Editor::draw(SDL_Renderer* renderer) {
     }
     ImGui::BeginChild("bottom", ImVec2(0.f, shownBottom), true);
     uiBottomH_ = ImGui::GetWindowHeight();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.f, 5.f));
     drawBottom();
+    ImGui::PopStyleVar();
     ImGui::EndChild();
     ImGui::PopStyleVar();
     drawFilePick();
