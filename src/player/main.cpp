@@ -38,6 +38,13 @@ int selfTest(const std::string& playerPath) {
     cc::Project loaded;
     if (!cc::Project::load(roundtrip, loaded, err)) return fail(err);
     if (loaded.settings.title != demo.settings.title) return fail("Title did not round-trip");
+    const cc::ActorDef* roundSlime = loaded.findActor("slime");
+    const cc::ActorDef* roundLift = loaded.findActor("lift");
+    if (!roundSlime || !roundSlime->behavior.stomp || !roundLift || roundLift->behavior.pattern != cc::AiPattern::Platform)
+        return fail("Stomp and moving platforms did not round-trip");
+    if (loaded.tilesets.empty() || loaded.tilesets[0].tiles.size() < 12 ||
+        (loaded.tilesets[0].tiles[11].flags & cc::TileCrumble) == 0)
+        return fail("Crumble tiles did not round-trip");
     if (loaded.stages.size() != demo.stages.size()) return fail("Stage count did not round-trip");
     if (loaded.sprites.empty() || loaded.sounds.empty() || loaded.actors.empty()) return fail("Assets missing after load");
     if (!demo.validate().empty()) return fail(demo.validate());
@@ -191,6 +198,102 @@ int selfTest(const std::string& playerPath) {
     if (scripted.score() != 40) return fail("Button script did not add score");
     if (scripted.debugProp("heard") != 1.f) return fail("Message was not delivered");
     if (scripted.debugProp("born") != 1.f) return fail("Spawn block did not create the actor");
+
+    {
+        cc::Project ride = cc::makeTemplate(cc::PhysicsMode::Platform, "Ride");
+        cc::Stage& stage = ride.stages[0];
+        for (int x = 0; x < 6; ++x) {
+            stage.set(stage.main, x, 13, 0);
+            stage.set(stage.main, x, 14, 0);
+        }
+        for (auto& placement : stage.placements)
+            if (placement.actorId == "runner") placement.y = 192.f;
+        cc::Placement spot;
+        spot.uid = ride.freshUid();
+        spot.actorId = "lift";
+        spot.x = 16.f;
+        spot.y = 208.f;
+        stage.placements.push_back(spot);
+        cc::Engine cart;
+        cart.start(ride, 0, {}, true);
+        const float startX = cart.playerX();
+        const float startY = cart.playerY();
+        for (int frame = 0; frame < 40; ++frame) cart.update(1.f / 60.f, {});
+        if (cart.playerX() < startX + 8.f || cart.playerY() > startY + 6.f) return fail("A moving platform did not carry the player");
+    }
+    {
+        cc::Project fall = cc::makeTemplate(cc::PhysicsMode::Platform, "Stomp");
+        for (auto& actor : fall.actors)
+            if (actor.id == "slime") {
+                actor.behavior.stomp = true;
+                actor.behavior.hp = 1;
+                actor.behavior.pattern = cc::AiPattern::Idle;
+                actor.behavior.speed = 0.f;
+                actor.behavior.gravity = false;
+                actor.hitW = 40.f;
+            }
+        for (auto& placement : fall.stages[0].placements) {
+            if (placement.actorId == "runner") placement.y = 32.f;
+            if (placement.actorId == "slime") {
+                placement.x = 20.f;
+                placement.y = 120.f;
+            }
+        }
+        cc::Engine boot;
+        boot.start(fall, 0, {}, true);
+        const int hp = boot.hp();
+        for (int frame = 0; frame < 50; ++frame) boot.update(1.f / 60.f, {});
+        if (boot.hp() != hp || boot.score() < 100) return fail("Landing on a stompable enemy did not defeat it");
+    }
+    {
+        cc::Project hole = cc::makeTemplate(cc::PhysicsMode::Platform, "Crumble");
+        cc::Tileset* set = hole.findTileset("main");
+        if (!set || set->tiles.empty()) return fail("Crumble test is missing a tileset");
+        cc::TileDef cracked = set->tiles[0];
+        cracked.flags = cc::TileSolid | cc::TileCrumble;
+        set->tiles.push_back(cracked);
+        hole.stages[0].set(hole.stages[0].main, 2, 13, static_cast<uint16_t>(set->tiles.size()));
+        cc::Engine ground;
+        ground.start(hole, 0, {}, true);
+        const float startY = ground.playerY();
+        for (int frame = 0; frame < 50; ++frame) ground.update(1.f / 60.f, {});
+        if (ground.debugTile(2, 13) != 0 || ground.playerY() < startY + 4.f) return fail("A crumble tile did not fall");
+    }
+    {
+        cc::Project blast = cc::makeTemplate(cc::PhysicsMode::Platform, "Special");
+        cc::ActorDef pack;
+        pack.id = "test_bomb";
+        pack.name = "Screen bomb";
+        pack.kind = cc::ActorKind::Item;
+        pack.pickup = cc::Pickup::Special;
+        pack.pickupAmount = 1;
+        pack.hitW = 20.f;
+        pack.hitH = 20.f;
+        pack.behavior.touchDamage = 0;
+        pack.behavior.gravity = false;
+        blast.actors.push_back(pack);
+        cc::Placement spot;
+        spot.uid = blast.freshUid();
+        spot.actorId = "test_bomb";
+        spot.x = 32.f;
+        spot.y = 192.f;
+        blast.stages[0].placements.push_back(spot);
+        cc::Engine gun;
+        gun.start(blast, 0, {}, true);
+        gun.update(1.f / 60.f, {});
+        if (gun.specialAmmo() != 1) return fail("A special pickup did not add ammo");
+        bool shot = false;
+        for (int frame = 0; frame < 36; ++frame) {
+            cc::Input input;
+            input.shoot = true;
+            input.shootEdge = frame == 0;
+            gun.update(1.f / 60.f, input);
+            if (frame == 0 && gun.debugBulletX() >= 0.f) shot = true;
+        }
+        if (!shot) return fail("Button 2 still needs to fire the normal shot");
+        gun.update(1.f / 60.f, {});
+        if (gun.specialAmmo() != 0 || gun.score() < 100) return fail("Holding button 2 did not spend the special");
+    }
 
     const std::string outDir = "/tmp/cabinetcore_export";
     if (!cc::exportGame(demo, outDir, playerPath, err)) return fail(err);

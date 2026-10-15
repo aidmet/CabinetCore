@@ -28,6 +28,8 @@ public:
     int lives() const { return lives_; }
     int hp() const { return hp_; }
     int stageIndex() const { return stageIndex_; }
+    int specialAmmo() const { return specialAmmo_; }
+    int debugTile(int tx, int ty) const;
     float playerX() const { return px_; }
     float playerY() const { return py_; }
     bool quitRequested() const { return quit_; }
@@ -73,6 +75,10 @@ private:
         bool onGround = false;
         bool blockedX = false;
         bool touchedHero = false;
+        bool platformMoved = false;
+        float rideX = 0.f;
+        float rideY = 0.f;
+        int shotDamage = 0;
         int heldFrame = -1;
         std::vector<float> props;
         std::vector<ScriptRt> scriptRt;
@@ -119,8 +125,15 @@ private:
     void moveBody(Ent& ent, float dt, bool gravity, bool passLadders = false);
     void advanceGrid(float& x, float& y, int& dirX, int& dirY, int wantX, int wantY, float dt, float speed, Ent* ghost);
     void chooseGhostDir(Ent& ghost, int cx, int cy);
-    void tryPlayerFire(const Input& input);
-    void spawnShot(const ActorDef& gun, float x, float y, float vx, float vy, bool fromPlayer);
+    void tryPlayerFire(const Input& input, float dt);
+    void fireSpecial(const Input& input);
+    void spawnShot(const ActorDef& gun, float x, float y, float vx, float vy, bool fromPlayer, int damage = 0);
+    void movePlatforms(float dt);
+    void stepPlatform(Ent& ent, float dt);
+    void carryRider();
+    void landOnPlatforms();
+    void tickCrumble(float dt);
+    int crumbleShake(int tx, int ty) const;
     void hurtPlayer(int amount);
     void loseLife();
     void killEnt(Ent& ent);
@@ -174,6 +187,8 @@ private:
     std::string scorePath_;
     std::string musicId_;
     std::string weaponId_;
+    std::string specialId_;
+    std::vector<float> crumble_;
     ScoreRow board_[5]{};
     Phase phase_ = Phase::Title;
     int stageIndex_ = 0;
@@ -196,6 +211,7 @@ private:
     float camX_ = 0, camY_ = 0;
     float time_ = 0, invuln_ = 0, shake_ = 0, flash_ = 0, pending_ = 0, endHold_ = 0;
     float fireCd_ = 0, playerAnim_ = 0, frightened_ = 0, ghostClock_ = 0, nameCool_ = 0;
+    float chargeHold_ = 0.f;
     bool quit_ = false;
     bool hasKey_ = false;
     bool onGround_ = false;
@@ -218,6 +234,8 @@ private:
     int messageDepth_ = 0;
     int playerFrame_ = -1;
     int stageRequest_ = -1;
+    int specialAmmo_ = 0;
+    int rideIndex_ = -1;
     bool stageRequestSet_ = false;
     std::vector<PendingSpawn> pendingSpawns_;
     float speedVar_ = 0.f;

@@ -243,6 +243,13 @@ void addCoreAssets(Project& project) {
         drone.rect(12, 7, 2, 2, 255, 80, 80);
         project.sprites.push_back(makeSprite("drone", "Drone", drone, 16, 1, 1));
     }
+    {
+        Pix plank(48, 8);
+        plank.rect(0, 1, 48, 6, 186, 122, 64);
+        plank.rect(0, 0, 48, 2, 230, 180, 90);
+        plank.rect(0, 6, 48, 2, 110, 70, 40);
+        project.sprites.push_back(makeSprite("plank", "Lift", plank, 48, 1, 1));
+    }
 
     Pix sheet(128, 32);
     auto cell = [&](int index, auto painter) {
@@ -308,6 +315,12 @@ void addCoreAssets(Project& project) {
         img.rect(x, y, 16, 16, 170, 220, 230);
         img.rect(x, y + 8, 16, 1, 220, 250, 255);
     });
+    cell(11, [](Pix& img, int x, int y) {
+        img.rect(x, y, 16, 16, 150, 86, 62);
+        img.rect(x + 2, y + 4, 6, 1, 60, 30, 24);
+        img.rect(x + 8, y + 9, 6, 1, 60, 30, 24);
+        img.rect(x + 5, y + 6, 1, 5, 60, 30, 24);
+    });
 
     Tileset tileset;
     tileset.id = "main";
@@ -330,6 +343,7 @@ void addCoreAssets(Project& project) {
     tileset.tiles[8].flags = TileWater;
     tileset.tiles[8].frames = 1;
     tileset.tiles[10].flags = TileSolid | TileIce;
+    tileset.tiles[11].flags = TileSolid | TileCrumble;
     project.tilesets.push_back(tileset);
 
     auto add = [&](ActorDef actor) { project.actors.push_back(std::move(actor)); };
@@ -418,6 +432,7 @@ void addCoreAssets(Project& project) {
         actor.behavior.hp = 2;
         actor.behavior.score = 100;
         actor.behavior.gravity = true;
+        actor.behavior.stomp = true;
         actor.dropActorId = "coin";
         actor.dropChance = 0.4f;
         add(actor);
@@ -567,6 +582,36 @@ void addCoreAssets(Project& project) {
         actor.projectileId = "spread";
         actor.hitW = 8;
         actor.hitH = 8;
+        actor.behavior.touchDamage = 0;
+        add(actor);
+    }
+    {
+        ActorDef actor;
+        actor.id = "bomb_pack";
+        actor.name = "Screen bomb";
+        actor.kind = ActorKind::Item;
+        actor.spriteId = "gun";
+        actor.pickup = Pickup::Special;
+        actor.pickupAmount = 2;
+        actor.hitW = 8;
+        actor.hitH = 8;
+        actor.behavior.gravity = false;
+        actor.behavior.touchDamage = 0;
+        add(actor);
+    }
+    {
+        ActorDef actor;
+        actor.id = "lift";
+        actor.name = "Lift";
+        actor.kind = ActorKind::Decoration;
+        actor.spriteId = "plank";
+        actor.hitW = 48;
+        actor.hitH = 8;
+        actor.behavior.pattern = AiPattern::Platform;
+        actor.behavior.aim = AimMode::Facing;
+        actor.behavior.speed = 36;
+        actor.behavior.amplitude = 48;
+        actor.behavior.gravity = false;
         actor.behavior.touchDamage = 0;
         add(actor);
     }
@@ -775,6 +820,10 @@ Project makeDemo() {
     for (int y = 7; y <= 12; ++y) paintTile(roofs, 18, y, 3);
     paintTile(roofs, 10, 12, 5);
     paintTile(roofs, 11, 12, 5);
+    paintTile(roofs, 20, 13, 12);
+    paintTile(roofs, 21, 13, 12);
+    place(project, roofs, "lift", 25 * 16.f, 13 * 16.f);
+    place(project, roofs, "bomb_pack", 30 * 16.f, 12 * 16.f);
     place(project, roofs, "runner", 2 * 16.f, 12 * 16.f);
     place(project, roofs, "coin", 7 * 16.f, 9 * 16.f);
     place(project, roofs, "coin", 9 * 16.f, 9 * 16.f);

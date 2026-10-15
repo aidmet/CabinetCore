@@ -30,8 +30,9 @@ const char* kPhysics[] = {"Platform", "Run and gun", "Vertical shooter", "Horizo
 const char* kScroll[] = {"Follow", "Locked", "Auto up", "Auto down", "Auto left", "Auto right"};
 const char* kComplete[] = {"Touch exit", "Reach end", "Collect all", "Defeat boss"};
 const char* kKinds[] = {"Hero", "Enemy", "Gun", "Item", "Check", "Boss", "Decoration"};
-const char* kPickups[] = {"None", "Coin", "Heal", "Extra life", "Weapon", "Invincibility", "Key", "Power pellet"};
-const char* kPatterns[] = {"None", "Idle", "Patrol", "Chase", "Shooter", "Sine", "Bounce", "Hopper", "Dive", "Maze ghost", "Boss", "Turret", "Fly"};
+const char* kPickups[] = {"None", "Coin", "Heal", "Extra life", "Weapon", "Invincibility", "Key", "Power pellet", "Special"};
+const char* kPatterns[] = {"None",     "Idle",   "Patrol", "Chase", "Shooter", "Sine", "Bounce", "Hopper",
+                           "Dive",     "Maze ghost", "Boss", "Turret", "Fly", "Platform"};
 const char* kAims[] = {"Facing", "At player", "Fixed angle", "Up", "Down"};
 const char* kTools[] = {"Select", "Paint", "Erase", "Fill", "Rect", "Stamp"};
 
@@ -267,6 +268,7 @@ uint32_t projectHash(const Project& project) {
         hash = mixHash(hash, actor.behavior.gravity ? 1u : 0u);
         hash = mixHash(hash, actor.behavior.turnAtEdge ? 1u : 0u);
         hash = mixHash(hash, actor.behavior.turnAtWall ? 1u : 0u);
+        hash = mixHash(hash, actor.behavior.stomp ? 1u : 0u);
         for (const auto& prop : actor.props) {
             hash = mixText(hash, prop.name);
             hash = mixFloat(hash, prop.initial);
@@ -385,7 +387,7 @@ void Editor::checkLevel() {
     };
     auto standable = [&](int tx, int ty) {
         const uint32_t flags = flagsAt(tx, ty);
-        return (flags & (TileSolid | TileOneWay)) != 0;
+        return (flags & (TileSolid | TileOneWay | TileCrumble)) != 0;
     };
     if (stage->intermission) levelNotes_.push_back("This stage is a message screen.");
     int heroes = 0;
@@ -643,6 +645,11 @@ void Editor::paintMap(SDL_Renderer* renderer) {
                     g = 210;
                     b = 40;
                     a = 120;
+                } else if (flags & TileCrumble) {
+                    r = 255;
+                    g = 140;
+                    b = 40;
+                    a = 120;
                 } else if (flags & TileOneWay) {
                     r = 40;
                     g = 210;
@@ -799,7 +806,7 @@ bool Editor::standable(const Stage& stage, int x, int y) {
     if (!set || id > static_cast<int>(set->tiles.size())) return false;
     const uint32_t flags = set->tiles[id - 1].flags;
     if (flags & (TileLadder | TileHazard | TileWater)) return false;
-    return (flags & (TileSolid | TileOneWay)) != 0;
+    return (flags & (TileSolid | TileOneWay | TileCrumble)) != 0;
 }
 
 bool Editor::placeActor(Stage& stage, const ActorDef* actor, int tx, int ty) {
@@ -1259,7 +1266,8 @@ void Editor::dressStretch(bool recordUndo) {
                 const size_t alpha = (static_cast<size_t>(py) * set->imgW + px) * 4 + 3;
                 if (alpha < set->rgba.size() && set->rgba[alpha] > 200) backdrop = id;
             }
-            if ((flags & TileSolid) && !(flags & (TileOneWay | TileLadder | TileHazard | TileWater | TileDestructible | TileIce)) &&
+            if ((flags & TileSolid) &&
+                !(flags & (TileOneWay | TileLadder | TileHazard | TileWater | TileDestructible | TileIce | TileCrumble)) &&
                 id != solidAny)
                 metal = id;
         }
@@ -1852,9 +1860,17 @@ void Editor::drawActorEditor(ActorDef& actor) {
     uint32_t pattern = static_cast<uint32_t>(actor.behavior.pattern);
     uint32_t aim = static_cast<uint32_t>(actor.behavior.aim);
     if (editEnum("Kind", kind, kKinds, 7)) actor.kind = static_cast<ActorKind>(kind);
-    if (editEnum("Behavior", pattern, kPatterns, 13)) actor.behavior.pattern = static_cast<AiPattern>(pattern);
+    if (editEnum("Behavior", pattern, kPatterns, 14)) {
+        actor.behavior.pattern = static_cast<AiPattern>(pattern);
+        if (actor.behavior.pattern == AiPattern::Platform) {
+            actor.behavior.gravity = false;
+            actor.behavior.touchDamage = 0;
+            if (actor.behavior.amplitude < 8.f) actor.behavior.amplitude = 64.f;
+            if (actor.behavior.speed < 8.f) actor.behavior.speed = 40.f;
+        }
+    }
     if (editEnum("Aim", aim, kAims, 5)) actor.behavior.aim = static_cast<AimMode>(aim);
-    if (editEnum("Pickup", pickup, kPickups, 8)) actor.pickup = static_cast<Pickup>(pickup);
+    if (editEnum("Pickup", pickup, kPickups, 9)) actor.pickup = static_cast<Pickup>(pickup);
     if (ImGui::BeginCombo("Sprite", actor.spriteId.c_str())) {
         for (const auto& sprite : project_.sprites) {
             if (ImGui::Selectable(sprite.id.c_str(), sprite.id == actor.spriteId)) actor.spriteId = sprite.id;
@@ -1872,6 +1888,14 @@ void Editor::drawActorEditor(ActorDef& actor) {
     ImGui::InputInt("Burst", &actor.behavior.burst);
     ImGui::InputInt("HP", &actor.behavior.hp);
     ImGui::InputInt("Touch damage", &actor.behavior.touchDamage);
+    ImGui::Checkbox("Stomp from above", &actor.behavior.stomp);
+    if (actor.behavior.pattern == AiPattern::Platform) {
+        ImGui::InputFloat("Travel distance", &actor.behavior.amplitude);
+        ImGui::TextWrapped("Facing rides left and right from where you placed it. Up or Down rides vertically. Speed is how fast it moves.");
+    }
+    if (actor.pickup == Pickup::Special)
+        ImGui::TextWrapped(
+            "Button 2 still fires the normal shot. Hold it to spend one special. Amount is how many you pick up. A projectile fires that shot; leave it empty to clear the screen. Burst above 1 spreads.");
     ImGui::InputInt("Score", &actor.behavior.score);
     ImGui::InputInt("Pickup amount", &actor.pickupAmount);
     ImGui::Checkbox("Gravity", &actor.behavior.gravity);
@@ -1912,6 +1936,7 @@ void Editor::drawTileFlags() {
     flag("Water", TileWater);
     flag("Ice", TileIce);
     flag("Destructible", TileDestructible);
+    flag("Crumble", TileCrumble);
     ImGui::InputInt("Anim frames", &tile.frames);
     ImGui::InputFloat("Anim fps", &tile.fps);
 }

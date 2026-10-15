@@ -37,6 +37,10 @@ void Engine::start(const Project& project, int stageIndex, const std::string& sc
     hasKey_ = false;
     frightened_ = 0;
     pending_ = 0;
+    specialAmmo_ = 0;
+    specialId_.clear();
+    chargeHold_ = 0.f;
+    rideIndex_ = -1;
     phase_ = Phase::Title;
     stageRequestSet_ = false;
     pendingSpawns_.clear();
@@ -120,6 +124,10 @@ void Engine::beginGame() {
     hasKey_ = false;
     frightened_ = 0;
     pending_ = 0;
+    specialAmmo_ = 0;
+    specialId_.clear();
+    chargeHold_ = 0.f;
+    rideIndex_ = -1;
     stageIndex_ = 0;
     if (!proj_->settings.startStage.empty()) {
         for (int i = 0; i < static_cast<int>(proj_->stages.size()); ++i) {
@@ -161,6 +169,9 @@ void Engine::loadStage() {
     tiles_ = st->main;
     if (tiles_.size() != static_cast<size_t>(st->width) * st->height)
         tiles_.assign(static_cast<size_t>(st->width) * st->height, 0);
+    crumble_.assign(tiles_.size(), -1.f);
+    chargeHold_ = 0.f;
+    rideIndex_ = -1;
 
     for (const auto& placement : st->placements) {
         const ActorDef* def = proj_->findActor(placement.actorId);
@@ -351,6 +362,7 @@ void Engine::updatePlaying(float dt, const Input& input) {
     playerAnim_ += dt;
     for (auto& ent : ents_) ent.anim += dt;
     updateCamera(dt);
+    movePlatforms(dt);
 
     if (st->physics == PhysicsMode::Maze) updateMaze(dt, input);
     else if (st->physics == PhysicsMode::ShooterVert || st->physics == PhysicsMode::ShooterHorz)
@@ -361,7 +373,8 @@ void Engine::updatePlaying(float dt, const Input& input) {
         updatePlatform(dt, input);
 
     fireCd_ = std::max(0.f, fireCd_ - dt);
-    if (st->physics != PhysicsMode::Maze) tryPlayerFire(input);
+    tickCrumble(dt);
+    if (st->physics != PhysicsMode::Maze) tryPlayerFire(input, dt);
 
     const size_t count = ents_.size();
     for (size_t i = 0; i < count; ++i) {
@@ -429,6 +442,11 @@ void Engine::updatePlaying(float dt, const Input& input) {
                     if (!ent.def->projectileId.empty()) weaponId_ = ent.def->projectileId;
                     sfx("pickup");
                     break;
+                case Pickup::Special:
+                    specialAmmo_ += std::max(1, ent.def->pickupAmount);
+                    specialId_ = ent.def->projectileId;
+                    sfx("pickup");
+                    break;
                 case Pickup::Invuln:
                     invuln_ = std::max(invuln_, static_cast<float>(std::max(1, ent.def->pickupAmount)));
                     sfx("pickup");
@@ -450,10 +468,24 @@ void Engine::updatePlaying(float dt, const Input& input) {
             ent.alive = false;
             continue;
         }
-        if ((ent.def->kind == ActorKind::Enemy || ent.def->kind == ActorKind::Boss) && ent.def->behavior.touchDamage > 0 &&
-            overlap(player, entBox(ent))) {
+        if ((ent.def->kind == ActorKind::Enemy || ent.def->kind == ActorKind::Boss) &&
+            (ent.def->behavior.touchDamage > 0 || ent.def->behavior.stomp) && overlap(player, entBox(ent))) {
             ent.touchedHero = true;
             heroTouching_ = true;
+            const Box heroBox = playerBox();
+            const Box body = entBox(ent);
+            const float feet = heroBox.y + heroBox.h;
+            const float prevFeet = feet - vy_ * dt;
+            const bool stomp = ent.def->behavior.stomp && ent.def->kind == ActorKind::Enemy && vy_ > 30.f &&
+                               prevFeet <= body.y + body.h * 0.45f && feet >= body.y - 2.f;
+            if (stomp) {
+                vy_ = -170.f;
+                onGround_ = false;
+                rideIndex_ = -1;
+                killEnt(ent);
+                continue;
+            }
+            if (ent.def->behavior.touchDamage <= 0) continue;
             if (ent.def->behavior.pattern == AiPattern::MazeGhost && frightened_ > 0.f) {
                 score_ += 200;
                 ent.alive = false;
@@ -591,7 +623,8 @@ bool Engine::solidTile(int tx, int ty) const {
         return tx < 0 || tx >= st->width;
     }
     const uint32_t flags = flagsAt(tx, ty);
-    return (flags & TileSolid) != 0;
+    if (flags & TileSolid) return true;
+    return (flags & TileCrumble) && !(flags & TileOneWay);
 }
 
 uint32_t Engine::flagsAt(int tx, int ty) const {
@@ -1131,6 +1164,7 @@ void Engine::updatePlatform(float dt, const Input& input) {
     if (std::abs(input.axisX) > 0.2f) facing_ = input.axisX > 0 ? 1 : -1;
     lockX_ = false;
     lockY_ = false;
+    carryRider();
     runHeroScripts(dt, kHatLive);
     const float jumpVel = hasJump_ ? jumpVar_ : st->jumpVel;
     Box box = playerBox();
@@ -1203,6 +1237,8 @@ void Engine::updatePlatform(float dt, const Input& input) {
     vy_ = body.vy;
     onGround_ = climbed ? false : body.onGround;
     blockedX_ = body.blockedX;
+    if (!climbed) landOnPlatforms();
+    else rideIndex_ = -1;
 }
 
 void Engine::updateShooter(float dt, const Input& input) {
@@ -1351,8 +1387,18 @@ void Engine::updateMaze(float dt, const Input& input) {
     }
 }
 
-void Engine::tryPlayerFire(const Input& input) {
+void Engine::tryPlayerFire(const Input& input, float dt) {
+    if (input.shoot && specialAmmo_ > 0) chargeHold_ += dt;
+    else if (!input.shoot && chargeHold_ >= 0.4f && specialAmmo_ > 0) {
+        fireSpecial(input);
+        chargeHold_ = 0.f;
+        return;
+    } else if (!input.shoot) {
+        chargeHold_ = 0.f;
+    }
+    const bool charging = specialAmmo_ > 0 && chargeHold_ > 0.05f;
     if (!proj_ || fireCd_ > 0.f || (!input.shoot && !input.shootEdge)) return;
+    if (charging && !input.shootEdge) return;
     const ActorDef* gun = proj_->findActor(weaponId_);
     const Stage* st = stage();
     if (!gun || !st) return;
@@ -1457,7 +1503,61 @@ void Engine::applyStageRequest() {
     loadStage();
 }
 
-void Engine::spawnShot(const ActorDef& gun, float x, float y, float vx, float vy, bool fromPlayer) {
+void Engine::fireSpecial(const Input& input) {
+    if (!proj_ || specialAmmo_ <= 0) return;
+    specialAmmo_ = std::max(0, specialAmmo_ - 1);
+    const ActorDef* gun = specialId_.empty() ? nullptr : proj_->findActor(specialId_);
+    const Stage* st = stage();
+    if (!gun || gun->kind != ActorKind::Gun || !st) {
+        flash_ = std::max(flash_, 0.28f);
+        if (proj_->settings.screenShake) shake_ = std::max(shake_, 0.45f);
+        sfx("explode");
+        for (auto& ent : ents_) {
+            if (!ent.alive || !ent.def) continue;
+            if (ent.projectile && !ent.fromPlayer) {
+                ent.alive = false;
+                continue;
+            }
+            const bool foe = ent.def->kind == ActorKind::Enemy || ent.def->kind == ActorKind::Boss;
+            if (!foe) continue;
+            const Box box = entBox(ent);
+            if (box.x + box.w < camX_ || box.x > camX_ + canvas_.width() || box.y + box.h < camY_ ||
+                box.y > camY_ + canvas_.height())
+                continue;
+            if (ent.def->kind == ActorKind::Boss) {
+                ent.hp -= 3;
+                if (ent.hp <= 0) killEnt(ent);
+                else burst(ent.x, ent.y, 6, 255, 220, 120);
+            } else {
+                killEnt(ent);
+            }
+        }
+        return;
+    }
+    float ax = input.axisX;
+    float ay = input.axisY;
+    if (st->physics == PhysicsMode::ShooterVert && std::abs(ax) < 0.25f && std::abs(ay) < 0.25f) ay = -1.f;
+    if (st->physics == PhysicsMode::ShooterHorz && std::abs(ax) < 0.25f && std::abs(ay) < 0.25f) ax = 1.f;
+    if (std::abs(ax) < 0.2f && std::abs(ay) < 0.2f) ax = static_cast<float>(facing_);
+    const float len = std::max(0.01f, std::sqrt(ax * ax + ay * ay));
+    const bool spread = gun->behavior.burst > 1;
+    const float shot = (gun->behavior.shotSpeed > 1.f ? gun->behavior.shotSpeed : 200.f) * (spread ? 1.f : 1.35f);
+    const float svx = ax / len * shot;
+    const float svy = ay / len * shot;
+    const int burstN = spread ? std::max(1, gun->behavior.burst) : 1;
+    const int damage = spread ? std::max(1, gun->behavior.touchDamage) : std::max(3, gun->behavior.touchDamage * 3);
+    for (int i = 0; i < burstN; ++i) {
+        float ang = 0.f;
+        if (burstN > 1) ang = (static_cast<float>(i) / static_cast<float>(burstN - 1) - 0.5f) * gun->behavior.spread;
+        const float cs = std::cos(ang);
+        const float sn = std::sin(ang);
+        spawnShot(*gun, px_ + psW_ * 0.5f, py_ + psH_ * 0.5f, svx * cs - svy * sn, svx * sn + svy * cs, true, damage);
+    }
+    fireCd_ = 0.35f;
+    sfx("shoot");
+}
+
+void Engine::spawnShot(const ActorDef& gun, float x, float y, float vx, float vy, bool fromPlayer, int damage) {
     if (ents_.size() >= 1000) return;
     Ent shot;
     shot.def = &gun;
@@ -1469,9 +1569,130 @@ void Engine::spawnShot(const ActorDef& gun, float x, float y, float vx, float vy
     shot.vy = vy;
     shot.life = gun.behavior.lifetime > 0 ? gun.behavior.lifetime : 1.5f;
     shot.hp = 1;
+    shot.shotDamage = damage;
     shot.alive = true;
     shot.awake = true;
     ents_.push_back(shot);
+}
+
+void Engine::stepPlatform(Ent& ent, float dt) {
+    if (!ent.def) return;
+    ent.timer += dt;
+    const Behavior& behavior = ent.def->behavior;
+    const float span = std::max(8.f, behavior.amplitude);
+    const float travel = std::max(8.f, behavior.speed);
+    const float half = span / travel;
+    const float cycle = half * 2.f;
+    float t = std::fmod(ent.timer, cycle);
+    if (t < 0.f) t += cycle;
+    const float along = t <= half ? (t / half) * span : (1.f - (t - half) / half) * span;
+    const bool vertical = behavior.aim == AimMode::Up || behavior.aim == AimMode::Down;
+    if (vertical) {
+        ent.x = ent.originX;
+        ent.y = behavior.aim == AimMode::Down ? ent.originY + along : ent.originY - along;
+    } else {
+        ent.y = ent.originY;
+        const float dir = ent.facing >= 0 ? 1.f : -1.f;
+        ent.x = ent.originX + dir * along;
+    }
+}
+
+void Engine::movePlatforms(float dt) {
+    for (auto& ent : ents_) {
+        if (!ent.alive || ent.projectile || !ent.def || ent.def->behavior.pattern != AiPattern::Platform) continue;
+        ent.awake = true;
+        const float prevX = ent.x;
+        const float prevY = ent.y;
+        stepPlatform(ent, dt);
+        ent.rideX = ent.x - prevX;
+        ent.rideY = ent.y - prevY;
+        ent.platformMoved = true;
+    }
+}
+
+void Engine::carryRider() {
+    if (rideIndex_ < 0 || rideIndex_ >= static_cast<int>(ents_.size())) {
+        rideIndex_ = -1;
+        return;
+    }
+    Ent& ent = ents_[static_cast<size_t>(rideIndex_)];
+    if (!ent.alive || !ent.def || ent.def->behavior.pattern != AiPattern::Platform) {
+        rideIndex_ = -1;
+        return;
+    }
+    px_ += ent.rideX;
+    py_ += ent.rideY;
+}
+
+void Engine::landOnPlatforms() {
+    if (vy_ < 0.f) {
+        rideIndex_ = -1;
+        return;
+    }
+    const Box box = playerBox();
+    const float feet = box.y + box.h;
+    int found = -1;
+    for (size_t i = 0; i < ents_.size(); ++i) {
+        const Ent& ent = ents_[i];
+        if (!ent.alive || !ent.def || ent.def->behavior.pattern != AiPattern::Platform) continue;
+        const Box top = entBox(ent);
+        const bool horiz = box.x + box.w > top.x + 1.f && box.x < top.x + top.w - 1.f;
+        const float slack = 7.f + std::abs(ent.rideY);
+        if (!horiz || feet < top.y - 1.f || feet > top.y + slack) continue;
+        py_ += (top.y - 0.5f) - feet;
+        found = static_cast<int>(i);
+        break;
+    }
+    if (found >= 0) {
+        vy_ = 0.f;
+        onGround_ = true;
+        rideIndex_ = found;
+    } else {
+        rideIndex_ = -1;
+    }
+}
+
+void Engine::tickCrumble(float dt) {
+    const Stage* st = stage();
+    if (!st) return;
+    if (onGround_ && !climbing_) {
+        const Box box = playerBox();
+        const int x0 = tileIndex(box.x, tileW_);
+        const int x1 = tileIndex(box.x + box.w - 0.01f, tileW_);
+        const int ty = tileIndex(box.y + box.h + 1.f, tileH_);
+        for (int tx = x0; tx <= x1; ++tx) {
+            if (tx < 0 || ty < 0 || tx >= st->width || ty >= st->height) continue;
+            if ((flagsAt(tx, ty) & TileCrumble) == 0) continue;
+            const size_t i = static_cast<size_t>(ty) * st->width + tx;
+            if (i < crumble_.size() && crumble_[i] < 0.f) crumble_[i] = 0.5f;
+        }
+    }
+    for (size_t i = 0; i < crumble_.size() && i < tiles_.size(); ++i) {
+        if (crumble_[i] < 0.f) continue;
+        crumble_[i] -= dt;
+        if (crumble_[i] > 0.f) continue;
+        crumble_[i] = -1.f;
+        const int tx = static_cast<int>(i % static_cast<size_t>(std::max(1, st->width)));
+        const int ty = static_cast<int>(i / static_cast<size_t>(std::max(1, st->width)));
+        tiles_[i] = 0;
+        burst(tx * tileW_ + tileW_ * 0.5f, ty * tileH_ + 4.f, 6, 180, 120, 70);
+    }
+}
+
+int Engine::crumbleShake(int tx, int ty) const {
+    const Stage* st = stage();
+    if (!st || tx < 0 || ty < 0 || tx >= st->width || ty >= st->height) return 0;
+    const size_t i = static_cast<size_t>(ty) * st->width + tx;
+    if (i >= crumble_.size() || crumble_[i] < 0.f) return 0;
+    return (static_cast<int>(time_ * 24.f) & 1) ? 1 : -1;
+}
+
+int Engine::debugTile(int tx, int ty) const {
+    const Stage* st = stage();
+    if (!st || tx < 0 || ty < 0 || tx >= st->width || ty >= st->height) return -1;
+    const size_t i = static_cast<size_t>(ty) * st->width + tx;
+    if (i >= tiles_.size()) return -1;
+    return tiles_[i];
 }
 
 void Engine::updateEnt(size_t index, float dt) {
@@ -1479,6 +1700,19 @@ void Engine::updateEnt(size_t index, float dt) {
     const Stage* st = stage();
     if (!ent.def || !st) return;
     const Behavior& behavior = ent.def->behavior;
+    if (behavior.pattern == AiPattern::Platform) {
+        if (!ent.platformMoved) {
+            const float prevX = ent.x;
+            const float prevY = ent.y;
+            stepPlatform(ent, dt);
+            ent.rideX = ent.x - prevX;
+            ent.rideY = ent.y - prevY;
+        }
+        ent.platformMoved = false;
+        ent.awake = true;
+        if (!ent.def->scripts.empty()) runActorScripts(ent, dt, kHatLive, true);
+        return;
+    }
     const bool near = ent.x + 32 > camX_ - 64 && ent.x < camX_ + canvas_.width() + 64 && ent.y + 32 > camY_ - 64 &&
                       ent.y < camY_ + canvas_.height() + 80;
     if (!ent.awake) {
@@ -1558,6 +1792,8 @@ void Engine::updateEnt(size_t index, float dt) {
             break;
         }
         case AiPattern::Bounce:
+            break;
+        case AiPattern::Platform:
             break;
         default:
             ent.vx = 0;
@@ -1681,7 +1917,7 @@ void Engine::updateProjectile(Ent& ent, float dt) {
         ent.alive = false;
         return;
     }
-    const int damage = ent.def ? std::max(1, ent.def->behavior.touchDamage) : 1;
+    const int damage = ent.shotDamage > 0 ? ent.shotDamage : (ent.def ? std::max(1, ent.def->behavior.touchDamage) : 1);
     if (ent.fromPlayer) {
         for (auto& other : ents_) {
             if (!other.alive || other.projectile || &other == &ent || !other.def) continue;
@@ -1843,6 +2079,7 @@ void Engine::drawEnt(const Ent& ent, int ox, int oy) {
     if (!sprite || sprite->rgba.empty()) {
         uint8_t r = 255, g = 80, b = 80;
         if (ent.def->kind == ActorKind::Item) { r = 255; g = 220; b = 60; }
+        if (ent.def->behavior.pattern == AiPattern::Platform) { r = 190; g = 130; b = 70; }
         if (ent.def->kind == ActorKind::Check) { r = 80; g = 220; b = 120; }
         if (ent.def->behavior.pattern == AiPattern::MazeGhost && frightened_ > 0.f) { r = 80; g = 140; b = 255; }
         canvas_.fillRect(dx, dy, spriteW(ent.def), spriteH(ent.def), r, g, b);
@@ -1894,6 +2131,17 @@ void Engine::drawHud() {
         canvas_.fillRect(4 + i * 8, 12, 6, 5, on ? 230 : 50, on ? 60 : 40, on ? 80 : 50);
     }
     if (hasKey_) canvas_.text(4 + hearts * 8 + 4, 11, "KEY", 255, 220, 80, 1);
+    if (specialAmmo_ > 0) {
+        std::snprintf(line, sizeof(line), "S%d", specialAmmo_);
+        const int sx = 4 + hearts * 8 + (hasKey_ ? 28 : 4);
+        canvas_.text(sx + 1, 12, line, 0, 0, 0, 1);
+        canvas_.text(sx, 11, line, 120, 220, 255, 1);
+        if (chargeHold_ > 0.05f) {
+            const int width = static_cast<int>(std::min(1.f, chargeHold_ / 0.4f) * 22.f);
+            canvas_.fillRect(sx, 20, 22, 3, 40, 50, 70);
+            canvas_.fillRect(sx, 20, width, 3, 255, 240, 120);
+        }
+    }
     const Ent* boss = nullptr;
     for (const auto& ent : ents_)
         if (ent.alive && ent.def && ent.def->kind == ActorKind::Boss) boss = &ent;
@@ -1996,7 +2244,7 @@ void Engine::render() {
     const int camY = static_cast<int>(std::lround(camY_)) + shakeY;
     const int parallaxX = static_cast<int>(camX_ * 0.4f);
     const int parallaxY = static_cast<int>(camY_ * 0.4f);
-    auto drawLayer = [&](const std::vector<uint16_t>& layer, int cx, int cy) {
+    auto drawLayer = [&](const std::vector<uint16_t>& layer, int cx, int cy, bool live) {
         if (!st) return;
         const int x0 = std::max(0, cx / tileW_ - 1);
         const int y0 = std::max(0, cy / tileH_ - 1);
@@ -2006,12 +2254,13 @@ void Engine::render() {
             for (int tx = x0; tx <= x1; ++tx) {
                 const size_t i = static_cast<size_t>(ty) * st->width + tx;
                 if (i >= layer.size()) continue;
-                drawTile(layer[i], tx * tileW_ - cx, ty * tileH_ - cy);
+                const int jiggle = live ? crumbleShake(tx, ty) : 0;
+                drawTile(layer[i], tx * tileW_ - cx + jiggle, ty * tileH_ - cy);
             }
         }
     };
-    if (st->back.size() == tiles_.size()) drawLayer(st->back, parallaxX, parallaxY);
-    drawLayer(tiles_, camX, camY);
+    if (st->back.size() == tiles_.size()) drawLayer(st->back, parallaxX, parallaxY, false);
+    drawLayer(tiles_, camX, camY, true);
     for (const auto& ent : ents_)
         if (ent.def && (ent.def->kind == ActorKind::Decoration || ent.def->kind == ActorKind::Item ||
                         ent.def->kind == ActorKind::Check))
@@ -2021,7 +2270,7 @@ void Engine::render() {
     if (phase_ != Phase::Intermission) drawPlayer(camX, camY);
     for (const auto& ent : ents_)
         if (ent.projectile) drawEnt(ent, camX, camY);
-    if (st->front.size() == tiles_.size()) drawLayer(st->front, camX, camY);
+    if (st->front.size() == tiles_.size()) drawLayer(st->front, camX, camY, false);
     for (const auto& part : parts_) {
         if (part.life <= 0) continue;
         canvas_.fillRect(static_cast<int>(part.x) - camX, static_cast<int>(part.y) - camY, 2, 2, part.r, part.g, part.b);
@@ -2062,6 +2311,11 @@ void Engine::drawHitboxes() {
             } else if (flags & TileLadder) {
                 r = 255;
                 g = 210;
+                b = 40;
+                a = 90;
+            } else if (flags & TileCrumble) {
+                r = 255;
+                g = 140;
                 b = 40;
                 a = 90;
             } else if (flags & TileOneWay) {

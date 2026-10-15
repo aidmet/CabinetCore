@@ -747,6 +747,18 @@ int Editor::runSelfTest(SDL_Renderer* renderer) {
         }
 
         fresh();
+        if (const int slime = actorIndex("slime"); slime >= 0) {
+            ActorDef& actor = project_.actors[static_cast<size_t>(slime)];
+            actor.behavior.stomp = true;
+            pushUndo();
+            actor.behavior.stomp = false;
+            undo();
+            expect("Stomp from above is remembered by undo", project_.actors[static_cast<size_t>(slime)].behavior.stomp, "");
+        } else {
+            expect("Stomp from above is remembered by undo", false, "No slime.");
+        }
+
+        fresh();
         undoSuspend_ = false;
         if (Tileset* set = tileset()) {
             expect("The tileset has a picture to paint", set->tileW > 0 && set->imgW >= set->tileW && !set->rgba.empty(), "");

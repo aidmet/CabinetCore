@@ -10,7 +10,7 @@ namespace cc {
 namespace {
 
 constexpr char kMagic[8] = {'C', 'C', 'O', 'R', 'E', 'D', 'A', 'T'};
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 3;
 
 void writeBlock(ByteWriter& w, const Block& block) {
     w.u32(static_cast<uint32_t>(block.kind));
@@ -100,9 +100,10 @@ void writeBehavior(ByteWriter& w, const Behavior& b) {
     w.boolean(b.gravity);
     w.boolean(b.turnAtEdge);
     w.boolean(b.turnAtWall);
+    w.boolean(b.stomp);
 }
 
-Behavior readBehavior(ByteReader& r) {
+Behavior readBehavior(ByteReader& r, uint32_t version) {
     Behavior b;
     b.pattern = static_cast<AiPattern>(r.u32());
     b.aim = static_cast<AimMode>(r.u32());
@@ -121,6 +122,7 @@ Behavior readBehavior(ByteReader& r) {
     b.gravity = r.boolean();
     b.turnAtEdge = r.boolean();
     b.turnAtWall = r.boolean();
+    if (version >= 3) b.stomp = r.boolean();
     return b;
 }
 
@@ -442,7 +444,7 @@ bool Project::load(const std::string& path, Project& project, std::string& err) 
         actor.pickupAmount = r.i32();
         actor.needsKey = r.boolean();
         actor.checkpoint = r.boolean();
-        actor.behavior = readBehavior(r);
+        actor.behavior = readBehavior(r, version);
         if (version >= 2) readActorScript(r, actor);
         loaded.actors.push_back(std::move(actor));
     }
@@ -567,6 +569,7 @@ const char* pickupName(Pickup pickup) {
         case Pickup::Invuln: return "Invincibility";
         case Pickup::Key: return "Key";
         case Pickup::PowerPellet: return "Power pellet";
+        case Pickup::Special: return "Special";
     }
     return "None";
 }
@@ -586,6 +589,7 @@ const char* patternName(AiPattern pattern) {
         case AiPattern::Boss: return "Boss";
         case AiPattern::Turret: return "Turret";
         case AiPattern::Fly: return "Fly";
+        case AiPattern::Platform: return "Platform";
     }
     return "Idle";
 }

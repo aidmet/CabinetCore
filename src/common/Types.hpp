@@ -49,7 +49,8 @@ enum class Pickup : uint32_t {
     Weapon = 4,
     Invuln = 5,
     Key = 6,
-    PowerPellet = 7
+    PowerPellet = 7,
+    Special = 8
 };
 
 enum class AiPattern : uint32_t {
@@ -65,7 +66,8 @@ enum class AiPattern : uint32_t {
     MazeGhost = 9,
     Boss = 10,
     Turret = 11,
-    Fly = 12
+    Fly = 12,
+    Platform = 13
 };
 
 enum class AimMode : uint32_t {
@@ -141,7 +143,8 @@ enum TileFlags : uint32_t {
     TileHazard = 1u << 3,
     TileWater = 1u << 4,
     TileIce = 1u << 5,
-    TileDestructible = 1u << 6
+    TileDestructible = 1u << 6,
+    TileCrumble = 1u << 7
 };
 
 struct Input {
@@ -177,6 +180,7 @@ struct Behavior {
     bool gravity = true;
     bool turnAtEdge = true;
     bool turnAtWall = true;
+    bool stomp = false;
 };
 
 struct Sprite {
